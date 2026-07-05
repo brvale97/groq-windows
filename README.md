@@ -8,6 +8,7 @@ Kleine Windows dictation app:
 - Transcriptie wordt altijd naar je klembord gezet.
 - Daarna wordt de tekst automatisch geplakt in het actieve venster.
 - Instellingen zitten in een tray-app, inclusief Groq API key, microfoon en autostart.
+- De app checkt GitHub Releases op updates en kan zichzelf bijwerken zonder je API key of instellingen te wissen.
 
 ## Setup
 
@@ -46,6 +47,10 @@ Instellingen worden opgeslagen in `%APPDATA%\GroqInsertDictation\settings.json`.
 - `PASTE_AFTER_TRANSCRIPTION=false` als je alleen het klembord wilt vullen.
 
 `.env` werkt nog als fallback/migratie, maar is niet meer nodig voor normaal gebruik.
+
+## Updates
+
+De app controleert bij het starten of er een nieuwere GitHub Release beschikbaar is. Als er een update is, verschijnt er een venster met een updateknop. De updater vervangt alleen de exe; instellingen en API key blijven in `%APPDATA%` en Windows Credential Manager staan.
 
 ## Opmerking
 

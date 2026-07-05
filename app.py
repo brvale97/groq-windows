@@ -8,6 +8,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -31,6 +33,9 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
+APP_VERSION = "0.1.5"
+GITHUB_REPO = "brvale97/groq-windows"
+LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
 KEYRING_USER = "groq_api_key"
 _INSTANCE_MUTEX_HANDLE = None
@@ -197,6 +202,113 @@ def set_autostart(enabled: bool) -> None:
 
 def autostart_enabled() -> bool:
     return startup_cmd_path().exists()
+
+
+@dataclass(frozen=True)
+class UpdateInfo:
+    version: str
+    tag: str
+    url: str
+    asset_name: str
+    download_url: str
+
+
+def parse_version(value: str) -> tuple[int, ...]:
+    clean = value.strip().lower().lstrip("v")
+    parts: list[int] = []
+    for part in clean.split("."):
+        digits = "".join(char for char in part if char.isdigit())
+        parts.append(int(digits or "0"))
+    return tuple(parts)
+
+
+def is_newer_version(candidate: str, current: str = APP_VERSION) -> bool:
+    left = parse_version(candidate)
+    right = parse_version(current)
+    max_len = max(len(left), len(right))
+    return left + (0,) * (max_len - len(left)) > right + (0,) * (max_len - len(right))
+
+
+def fetch_latest_update() -> UpdateInfo | None:
+    request = urllib.request.Request(
+        LATEST_RELEASE_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": APP_SLUG,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        release = json.loads(response.read().decode("utf-8"))
+
+    tag = str(release.get("tag_name", "")).strip()
+    if not tag or not is_newer_version(tag):
+        return None
+
+    assets = release.get("assets") or []
+    for asset in assets:
+        name = str(asset.get("name", ""))
+        if name.lower() == f"{APP_SLUG}.exe".lower():
+            download_url = str(asset.get("browser_download_url", ""))
+            if download_url:
+                return UpdateInfo(
+                    version=tag.lstrip("v"),
+                    tag=tag,
+                    url=str(release.get("html_url", "")),
+                    asset_name=name,
+                    download_url=download_url,
+                )
+
+    return None
+
+
+def download_update(update: UpdateInfo) -> Path:
+    update_dir = APP_DIR / "updates"
+    update_dir.mkdir(parents=True, exist_ok=True)
+    destination = update_dir / f"{APP_SLUG}-{update.tag}.exe"
+    request = urllib.request.Request(
+        update.download_url,
+        headers={"User-Agent": APP_SLUG},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        destination.write_bytes(response.read())
+    return destination
+
+
+def current_exe_path() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable)
+    return Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "Programs" / APP_SLUG / f"{APP_SLUG}.exe"
+
+
+def launch_update_script(downloaded_exe: Path) -> None:
+    target = current_exe_path()
+    script = APP_DIR / "apply-update.cmd"
+    script.write_text(
+        "\r\n".join(
+            [
+                "@echo off",
+                "setlocal",
+                f'set "SOURCE={downloaded_exe}"',
+                f'set "TARGET={target}"',
+                ":wait",
+                f'tasklist /FI "IMAGENAME eq {APP_SLUG}.exe" | find /I "{APP_SLUG}.exe" >nul',
+                "if not errorlevel 1 (",
+                "  timeout /t 1 /nobreak >nul",
+                "  goto wait",
+                ")",
+                'copy /Y "%SOURCE%" "%TARGET%" >nul',
+                "if errorlevel 1 exit /b 1",
+                'start "" "%TARGET%"',
+                'del "%SOURCE%" >nul 2>nul',
+                'del "%~f0" >nul 2>nul',
+                "",
+            ]
+        ),
+        encoding="ascii",
+    )
+
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=creation_flags)
 
 
 def create_icon_image() -> Image.Image:
@@ -596,12 +708,14 @@ class TrayApp:
         self.config = load_config()
         self.engine = DictationEngine(self.config, self.set_status)
         self.hotkey_handle = None
+        self.update_window = None
         self.icon = pystray.Icon(
             APP_SLUG,
             create_icon_image(),
-            APP_NAME,
+            f"{APP_NAME} v{APP_VERSION}",
             menu=pystray.Menu(
                 pystray.MenuItem("Instellingen", lambda: self.root.after(0, self.open_settings)),
+                pystray.MenuItem("Controleren op updates", lambda: self.root.after(0, self.check_for_updates_manual)),
                 pystray.MenuItem("Geluiden testen", lambda: self.root.after(0, self.test_sounds)),
                 pystray.MenuItem("Logbestand openen", lambda: self.root.after(0, self.open_log)),
                 pystray.MenuItem("Afsluiten", lambda: self.root.after(0, self.quit)),
@@ -636,7 +750,107 @@ class TrayApp:
 
         if not self.config.api_key:
             self.root.after(250, self.open_settings)
+        self.root.after(2500, self.check_for_updates_auto)
         self.root.mainloop()
+
+    def check_for_updates_auto(self) -> None:
+        if not getattr(sys, "frozen", False):
+            return
+        self.check_for_updates(show_no_update=False)
+
+    def check_for_updates_manual(self) -> None:
+        self.check_for_updates(show_no_update=True)
+
+    def check_for_updates(self, show_no_update: bool) -> None:
+        def run() -> None:
+            try:
+                update = fetch_latest_update()
+            except Exception as exc:
+                logging.warning("Update check failed: %s", exc)
+                if show_no_update:
+                    self.root.after(0, lambda: messagebox.showerror(APP_NAME, f"Update-check mislukt:\n{exc}"))
+                return
+
+            if update is None:
+                if show_no_update:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            APP_NAME,
+                            f"Je gebruikt de nieuwste versie: v{APP_VERSION}.",
+                        ),
+                    )
+                return
+
+            self.root.after(0, lambda: self.show_update_window(update))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def show_update_window(self, update: UpdateInfo) -> None:
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.lift()
+            self.update_window.focus_force()
+            return
+
+        window = Toplevel(self.root)
+        self.update_window = window
+        window.title("Nieuwe versie beschikbaar")
+        window.geometry("480x220")
+        window.resizable(False, False)
+
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            frame,
+            text=f"Er is een nieuwe versie beschikbaar: {update.tag}",
+            font=("", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        ttk.Label(
+            frame,
+            text=(
+                f"Je gebruikt nu v{APP_VERSION}. Klik op Update om de nieuwe versie te downloaden, "
+                "de app te vervangen en opnieuw te starten. Je Groq API key en instellingen blijven behouden."
+            ),
+            wraplength=430,
+        ).grid(row=1, column=0, sticky="w")
+
+        status = StringVar(value="")
+        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=2, column=0, sticky="w", pady=14)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, sticky="e", pady=(8, 0))
+
+        update_button = ttk.Button(buttons, text=f"Update naar {update.tag}")
+        update_button.pack(side="left", padx=6)
+        ttk.Button(buttons, text="Later", command=window.destroy).pack(side="left", padx=6)
+
+        def start_update() -> None:
+            update_button.configure(state="disabled")
+            status.set("Downloaden...")
+
+            def run() -> None:
+                try:
+                    downloaded = download_update(update)
+                    launch_update_script(downloaded)
+                except Exception as exc:
+                    logging.exception("Update failed")
+                    self.root.after(
+                        0,
+                        lambda: (
+                            update_button.configure(state="normal"),
+                            status.set("Update mislukt."),
+                            messagebox.showerror(APP_NAME, f"Update mislukt:\n{exc}"),
+                        ),
+                    )
+                    return
+
+                self.root.after(0, self.quit)
+
+            threading.Thread(target=run, daemon=True).start()
+
+        update_button.configure(command=start_update)
 
     def open_settings(self) -> None:
         if hasattr(self, "settings_window") and self.settings_window.winfo_exists():
