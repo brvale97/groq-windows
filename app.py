@@ -33,6 +33,7 @@ APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 KEYRING_SERVICE = APP_SLUG
 KEYRING_USER = "groq_api_key"
+_INSTANCE_MUTEX_HANDLE = None
 
 
 def app_data_dir() -> Path:
@@ -55,6 +56,18 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+
+def acquire_single_instance_lock() -> bool:
+    if os.name != "nt":
+        return True
+
+    import ctypes
+
+    global _INSTANCE_MUTEX_HANDLE
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _INSTANCE_MUTEX_HANDLE = kernel32.CreateMutexW(None, False, f"Local\\{APP_SLUG}SingleInstance")
+    return ctypes.get_last_error() != 183
 
 
 @dataclass
@@ -771,6 +784,9 @@ class TrayApp:
 
 
 def main() -> None:
+    if not acquire_single_instance_lock():
+        return
+
     try:
         TrayApp().run()
     except Exception as exc:
