@@ -13,7 +13,7 @@ import urllib.request
 import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, Toplevel, messagebox, ttk
+from tkinter import BooleanVar, Canvas, StringVar, Tk, Toplevel, messagebox, ttk
 
 import keyboard
 import keyring
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -498,10 +498,110 @@ def remove_final_sentence_period(text: str) -> str:
     return text
 
 
+class StatusBubble:
+    def __init__(self, root: Tk, on_click) -> None:
+        self.root = root
+        self.on_click = on_click
+        self.state = "idle"
+        self.size = 74
+        self.window = Toplevel(root)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        try:
+            self.window.attributes("-toolwindow", True)
+        except Exception:
+            pass
+
+        self.transparent_color = "#101011"
+        self.window.configure(bg=self.transparent_color)
+        try:
+            self.window.attributes("-transparentcolor", self.transparent_color)
+        except Exception:
+            pass
+
+        self.canvas = Canvas(
+            self.window,
+            width=self.size,
+            height=self.size,
+            highlightthickness=0,
+            bd=0,
+            bg=self.transparent_color,
+            cursor="hand2",
+        )
+        self.canvas.pack()
+        self.canvas.bind("<Button-1>", lambda _event: self.on_click())
+        self.window.bind("<Button-1>", lambda _event: self.on_click())
+        self.root.bind("<Configure>", lambda _event: self.position(), add="+")
+
+        self.position()
+        self.set_state("idle")
+        self.window.deiconify()
+
+    def position(self) -> None:
+        try:
+            screen_width = self.window.winfo_screenwidth()
+            screen_height = self.window.winfo_screenheight()
+            x = max(0, screen_width - self.size - 26)
+            y = max(0, screen_height - self.size - 82)
+            self.window.geometry(f"{self.size}x{self.size}+{x}+{y}")
+        except Exception:
+            pass
+
+    def set_state(self, state: str) -> None:
+        self.state = state
+        self.canvas.delete("all")
+
+        colors = {
+            "idle": ("#0f766e", "#14b8a6", "Klaar"),
+            "recording": ("#b91c1c", "#ef4444", "Opname"),
+            "processing": ("#a16207", "#f59e0b", "Transcriptie"),
+        }
+        shadow = "#000000"
+        outline, fill, tooltip = colors.get(state, colors["idle"])
+
+        self.canvas.create_oval(8, 8, 68, 68, fill=shadow, outline="", stipple="gray50")
+        self.canvas.create_oval(6, 4, 66, 64, fill=fill, outline=outline, width=2)
+        self.canvas.create_oval(12, 8, 36, 26, fill="#ffffff", outline="", stipple="gray25")
+
+        if state == "processing":
+            self.draw_processing_icon()
+        else:
+            self.draw_mic_icon()
+            if state == "recording":
+                self.canvas.create_oval(47, 13, 57, 23, fill="#ffffff", outline="")
+
+        self.window.title(f"{APP_NAME} - {tooltip}")
+        self.position()
+
+    def draw_mic_icon(self) -> None:
+        self.canvas.create_rectangle(29, 25, 45, 35, fill="#ffffff", outline="")
+        self.canvas.create_oval(29, 17, 45, 33, fill="#ffffff", outline="")
+        self.canvas.create_oval(29, 31, 45, 47, fill="#ffffff", outline="")
+        self.canvas.create_line(24, 34, 24, 36, 25, 42, 30, 47, 37, 49, 44, 47, 49, 42, 50, 36, 50, 34, fill="#ffffff", width=3, smooth=True)
+        self.canvas.create_line(37, 49, 37, 56, fill="#ffffff", width=3)
+        self.canvas.create_line(30, 56, 44, 56, fill="#ffffff", width=3, capstyle="round")
+
+    def draw_processing_icon(self) -> None:
+        self.canvas.create_line(24, 20, 50, 20, fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(28, 24, 46, 42, fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(46, 24, 28, 42, fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(24, 46, 50, 46, fill="#ffffff", width=4, capstyle="round")
+        for x in (28, 37, 46):
+            self.canvas.create_oval(x - 2, 55, x + 2, 59, fill="#ffffff", outline="")
+
+    def destroy(self) -> None:
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+
+
 class DictationEngine:
-    def __init__(self, config: Config, status_callback=None) -> None:
+    def __init__(self, config: Config, status_callback=None, state_callback=None) -> None:
         self.config = config
         self.status_callback = status_callback or (lambda message: None)
+        self.state_callback = state_callback or (lambda state: None)
         self.input_device = resolve_input_device(config.input_device)
         self.client = Groq(api_key=config.api_key) if config.api_key else None
         self.audio_queue: queue.Queue = queue.Queue()
@@ -523,6 +623,14 @@ class DictationEngine:
         logging.info(message)
         self.status_callback(message)
 
+    def set_state(self, state: str) -> None:
+        with self.lock:
+            self.state = state
+        self.emit_state(state)
+
+    def emit_state(self, state: str) -> None:
+        self.state_callback(state)
+
     def on_shortcut(self) -> None:
         try:
             with self.lock:
@@ -537,6 +645,7 @@ class DictationEngine:
         except Exception as exc:
             with self.lock:
                 self.state = "idle"
+            self.emit_state("idle")
             self.notify(f"Kon opname niet starten/stoppen: {exc}")
             play_sound("error.wav")
 
@@ -565,8 +674,10 @@ class DictationEngine:
         except Exception:
             with self.lock:
                 self.state = "idle"
+            self.emit_state("idle")
             raise
 
+        self.emit_state("recording")
         play_sound("start.wav")
         self.notify("Opname gestart. Druk nog eens op Insert om te stoppen.")
 
@@ -575,6 +686,7 @@ class DictationEngine:
             if self.state != "recording":
                 return
             self.state = "processing"
+        self.emit_state("processing")
 
         if self.stream is not None:
             self.stream.stop()
@@ -673,6 +785,7 @@ class DictationEngine:
                     pass
             with self.lock:
                 self.state = "idle"
+            self.emit_state("idle")
             self.notify("Klaar. Druk op Insert voor een nieuwe opname.")
 
     def transcribe(self, wav_path: Path) -> str:
@@ -706,7 +819,8 @@ class TrayApp:
         self.root.title(APP_NAME)
 
         self.config = load_config()
-        self.engine = DictationEngine(self.config, self.set_status)
+        self.bubble = StatusBubble(self.root, self.open_settings)
+        self.engine = DictationEngine(self.config, self.set_status, self.set_engine_state)
         self.hotkey_handle = None
         self.update_window = None
         self.icon = pystray.Icon(
@@ -728,6 +842,9 @@ class TrayApp:
             self.icon.title = f"{APP_NAME} - {message[:50]}"
         except Exception:
             pass
+
+    def set_engine_state(self, state: str) -> None:
+        self.root.after(0, lambda: self.bubble.set_state(state))
 
     def install_hotkey(self) -> None:
         self.remove_hotkey()
@@ -1024,6 +1141,7 @@ class TrayApp:
 
     def quit(self) -> None:
         self.remove_hotkey()
+        self.bubble.destroy()
         try:
             self.icon.stop()
         except Exception:

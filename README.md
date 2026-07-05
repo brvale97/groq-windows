@@ -9,6 +9,7 @@ Kleine Windows dictation app:
 - Daarna wordt de tekst automatisch geplakt in het actieve venster.
 - Instellingen zitten in een tray-app, inclusief Groq API key, microfoon en autostart.
 - De app checkt GitHub Releases op updates en kan zichzelf bijwerken zonder je API key of instellingen te wissen.
+- Rechtsonder staat een klein statusicoon: klaar, opnemen, of transcriberen.
 
 ## Setup
 
