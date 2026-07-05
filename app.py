@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -315,7 +315,8 @@ def launch_update_script(downloaded_exe: Path) -> None:
                 "  Log \"Copying $Source to $Target\"",
                 "  Copy-Item -LiteralPath $Source -Destination $Target -Force",
                 "  Log \"Starting $Target\"",
-                "  Start-Process -FilePath $Target",
+                "  $Env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
+                "  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)",
                 "  Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue",
                 "  Log \"Update complete\"",
                 "} catch {",
@@ -1431,6 +1432,10 @@ class TrayApp:
 
 
 def main() -> None:
+    if "--version" in sys.argv:
+        print(APP_VERSION)
+        return
+
     if not acquire_single_instance_lock():
         return
 
