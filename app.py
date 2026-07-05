@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.10"
+APP_VERSION = "0.1.11"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -719,12 +719,15 @@ class StatusBubble:
         self.root = root
         self.on_click = on_click
         self.state = "idle"
-        self.size = 48
-        self.window_width = self.size
-        self.window_height = self.size
+        self.button_size = 44
+        self.window_width = self.button_size
+        self.window_height = self.button_size
         self.hide_after_id = None
         self.spinner_after_id = None
         self.spinner_angle = 0
+        self.wave_after_id = None
+        self.wave_phase = 0
+        self.recording_started_at = 0.0
         self.window = Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -743,8 +746,8 @@ class StatusBubble:
 
         self.canvas = Canvas(
             self.window,
-            width=self.size,
-            height=self.size,
+            width=self.window_width,
+            height=self.window_height,
             highlightthickness=0,
             bd=0,
             bg=self.transparent_color,
@@ -795,6 +798,14 @@ class StatusBubble:
                 pass
             self.spinner_after_id = None
 
+    def stop_wave(self) -> None:
+        if self.wave_after_id is not None:
+            try:
+                self.root.after_cancel(self.wave_after_id)
+            except Exception:
+                pass
+            self.wave_after_id = None
+
     def start_spinner(self) -> None:
         self.stop_spinner()
 
@@ -808,6 +819,20 @@ class StatusBubble:
 
         tick()
 
+    def start_wave(self) -> None:
+        self.stop_wave()
+        self.recording_started_at = time.perf_counter()
+
+        def tick() -> None:
+            if self.state != "recording":
+                self.wave_after_id = None
+                return
+            self.wave_phase = (self.wave_phase + 1) % 1000
+            self.draw_recording_pill()
+            self.wave_after_id = self.root.after(120, tick)
+
+        tick()
+
     def hide(self) -> None:
         self.hide_after_id = None
         try:
@@ -818,8 +843,9 @@ class StatusBubble:
     def set_state(self, state: str, schedule_hide: bool = True) -> None:
         self.state = state
         self.stop_spinner()
-        self.window_width = self.size
-        self.window_height = self.size
+        self.stop_wave()
+        self.window_width = 176 if state == "recording" else 142 if state == "processing" else self.button_size
+        self.window_height = 48 if state in {"recording", "processing"} else self.button_size
         self.canvas.configure(width=self.window_width, height=self.window_height)
         if state != "idle":
             self.show()
@@ -831,7 +857,10 @@ class StatusBubble:
             "recording": "Opname",
             "processing": "Transcriptie",
         }
-        if state == "processing":
+        if state == "recording":
+            self.draw_recording_pill()
+            self.start_wave()
+        elif state == "processing":
             self.draw_processing_button()
             self.start_spinner()
         else:
@@ -844,14 +873,16 @@ class StatusBubble:
 
     def show_notice(self, message: str) -> None:
         self.stop_spinner()
+        self.stop_wave()
         self.state = "notice"
         self.window_width = 176
-        self.window_height = self.size
+        self.window_height = 48
         self.canvas.configure(width=self.window_width, height=self.window_height)
         self.show()
         self.canvas.delete("all")
 
-        self.draw_round_rect(0, 0, self.window_width - 1, self.window_height - 1, 14, BUBBLE_COLORS["idle"])
+        self.draw_round_rect(1, 1, self.window_width - 2, self.window_height - 2, 12, "#fff6f7")
+        self.draw_round_rect_outline(1, 1, self.window_width - 2, self.window_height - 2, 12, "#f3b6bd")
         self.canvas.create_oval(11, 11, 37, 37, fill="#ffffff", outline="")
         self.canvas.create_text(24, 24, text="!", fill=BUBBLE_COLORS["idle"], font=("Segoe UI", 16, "bold"))
         self.canvas.create_text(
@@ -866,54 +897,90 @@ class StatusBubble:
         self.schedule_hide()
 
     def draw_mic_button(self, state: str) -> None:
-        color = BUBBLE_COLORS["recording"] if state == "recording" else BUBBLE_COLORS["idle"]
-        if state == "idle":
-            self.draw_round_rect(5, 5, self.size - 5, self.size - 5, 11, color)
-        else:
-            self.canvas.create_oval(4, 4, self.size - 4, self.size - 4, fill=color, outline="")
+        self.draw_round_rect(1, 1, self.button_size - 2, self.button_size - 2, 22, "#fff6f7")
+        self.draw_round_rect_outline(1, 1, self.button_size - 2, self.button_size - 2, 22, "#f3b6bd")
         self.draw_mic_icon()
 
     def draw_processing_button(self) -> None:
         self.canvas.delete("all")
-        self.canvas.create_oval(4, 4, self.size - 4, self.size - 4, fill=BUBBLE_COLORS["recording"], outline="")
-        self.canvas.create_oval(15, 15, 33, 33, outline="#ffffff", width=2)
+        self.draw_glass_pill()
+        self.canvas.create_oval(16, 15, 33, 32, outline="#f3b6bd", width=2)
         self.canvas.create_arc(
-            14,
+            15,
             14,
             34,
-            34,
+            33,
             start=self.spinner_angle,
             extent=105,
             style="arc",
-            outline="#ffffff",
-            width=4,
+            outline=BUBBLE_COLORS["idle"],
+            width=3,
+        )
+        self.canvas.create_text(
+            45,
+            24,
+            text="Transcriberen",
+            fill="#a11b28",
+            anchor="w",
+            font=("Segoe UI", 9, "bold"),
         )
 
+    def draw_recording_pill(self) -> None:
+        self.canvas.delete("all")
+        self.draw_glass_pill()
+        for index in range(7):
+            phase = (self.wave_phase + index * 2) % 12
+            distance = abs(phase - 6)
+            height = 8 + (6 - distance) * 2
+            x = 18 + index * 5
+            y_mid = 24
+            self.canvas.create_line(
+                x,
+                y_mid - height / 2,
+                x,
+                y_mid + height / 2,
+                fill="#d92c3a",
+                width=3,
+                capstyle="round",
+            )
+
+        elapsed = max(0, int(time.perf_counter() - self.recording_started_at))
+        elapsed_label = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+        self.canvas.create_text(70, 24, text=elapsed_label, fill="#a11b28", anchor="w", font=("Segoe UI", 9, "bold"))
+        self.draw_round_rect(128, 10, 156, 38, 8, "#ffe4e7")
+        self.draw_round_rect_outline(128, 10, 156, 38, 8, "#f3b6bd")
+        self.canvas.create_rectangle(138, 20, 146, 28, fill=BUBBLE_COLORS["idle"], outline="")
+
+    def draw_glass_pill(self) -> None:
+        self.draw_round_rect(1, 1, self.window_width - 2, self.window_height - 2, 12, "#fff6f7")
+        self.draw_round_rect_outline(1, 1, self.window_width - 2, self.window_height - 2, 12, "#f3b6bd")
+
     def draw_mic_icon(self) -> None:
-        self.canvas.create_line(24, 14, 24, 27, fill="#ffffff", width=8, capstyle="round")
+        center = self.button_size // 2
+        self.canvas.create_line(center, 12, center, 25, fill=BUBBLE_COLORS["idle"], width=7, capstyle="round")
         self.canvas.create_line(
-            14,
-            25,
-            14,
-            28,
-            16,
-            34,
-            24,
-            37,
+            center - 10,
+            23,
+            center - 10,
+            27,
+            center - 8,
             32,
-            34,
-            34,
-            28,
-            34,
-            25,
-            fill="#ffffff",
+            center,
+            35,
+            center + 8,
+            32,
+            center + 10,
+            27,
+            center + 10,
+            23,
+            fill=BUBBLE_COLORS["idle"],
             width=3,
             capstyle="round",
             joinstyle="round",
             smooth=True,
         )
-        self.canvas.create_line(24, 37, 24, 42, fill="#ffffff", width=3, capstyle="round")
-        self.canvas.create_line(19, 42, 29, 42, fill="#ffffff", width=3, capstyle="round")
+        self.canvas.create_line(center, 35, center, 40, fill=BUBBLE_COLORS["idle"], width=3, capstyle="round")
+        self.canvas.create_line(center - 5, 40, center + 5, 40, fill=BUBBLE_COLORS["idle"], width=3, capstyle="round")
 
     def draw_round_rect(self, x1: int, y1: int, x2: int, y2: int, radius: int, fill: str) -> None:
         self.canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
@@ -923,8 +990,19 @@ class StatusBubble:
         self.canvas.create_oval(x1, y2 - radius * 2, x1 + radius * 2, y2, fill=fill, outline="")
         self.canvas.create_oval(x2 - radius * 2, y2 - radius * 2, x2, y2, fill=fill, outline="")
 
+    def draw_round_rect_outline(self, x1: int, y1: int, x2: int, y2: int, radius: int, outline: str) -> None:
+        self.canvas.create_line(x1 + radius, y1, x2 - radius, y1, fill=outline)
+        self.canvas.create_line(x1 + radius, y2, x2 - radius, y2, fill=outline)
+        self.canvas.create_line(x1, y1 + radius, x1, y2 - radius, fill=outline)
+        self.canvas.create_line(x2, y1 + radius, x2, y2 - radius, fill=outline)
+        self.canvas.create_arc(x1, y1, x1 + radius * 2, y1 + radius * 2, start=90, extent=90, outline=outline, style="arc")
+        self.canvas.create_arc(x2 - radius * 2, y1, x2, y1 + radius * 2, start=0, extent=90, outline=outline, style="arc")
+        self.canvas.create_arc(x1, y2 - radius * 2, x1 + radius * 2, y2, start=180, extent=90, outline=outline, style="arc")
+        self.canvas.create_arc(x2 - radius * 2, y2 - radius * 2, x2, y2, start=270, extent=90, outline=outline, style="arc")
+
     def destroy(self) -> None:
         self.stop_spinner()
+        self.stop_wave()
         if self.hide_after_id is not None:
             try:
                 self.root.after_cancel(self.hide_after_id)
