@@ -447,7 +447,6 @@ class DictationEngine:
             except queue.Empty:
                 break
 
-        play_sound("processing.wav")
         self.notify("Opname gestopt. Transcriberen...")
         threading.Thread(target=self.transcribe_and_output, daemon=True).start()
 
@@ -760,7 +759,7 @@ class TrayApp:
 
     def test_sounds(self) -> None:
         def run() -> None:
-            for sound in ("start.wav", "processing.wav", "success.wav"):
+            for sound in ("start.wav", "success.wav"):
                 play_sound(sound)
                 time.sleep(0.32)
 
