@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.11"
+APP_VERSION = "0.1.12"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -875,7 +875,7 @@ class StatusBubble:
         self.stop_spinner()
         self.stop_wave()
         self.state = "notice"
-        self.window_width = 176
+        self.window_width = 218
         self.window_height = 48
         self.canvas.configure(width=self.window_width, height=self.window_height)
         self.show()
@@ -889,7 +889,7 @@ class StatusBubble:
             46,
             24,
             text=message,
-            fill="#ffffff",
+            fill="#a11b28",
             anchor="w",
             font=("Segoe UI", 10, "bold"),
         )
@@ -1259,6 +1259,7 @@ class TrayApp:
                 pystray.MenuItem("Controleren op updates", lambda: self.root.after(0, self.check_for_updates_manual)),
                 pystray.MenuItem("Geluiden testen", lambda: self.root.after(0, self.test_sounds)),
                 pystray.MenuItem("Logbestand openen", lambda: self.root.after(0, self.open_log)),
+                pystray.MenuItem("App herstarten", lambda: self.root.after(0, self.restart)),
                 pystray.MenuItem("Afsluiten", lambda: self.root.after(0, self.quit)),
             ),
         )
@@ -1568,6 +1569,24 @@ class TrayApp:
             os.startfile(LOG_PATH)  # type: ignore[attr-defined]
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Logbestand kon niet worden geopend:\n{exc}")
+
+    def restart(self) -> None:
+        env = os.environ.copy()
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            if getattr(sys, "frozen", False):
+                executable = Path(sys.executable)
+                subprocess.Popen([str(executable)], cwd=str(executable.parent), env=env, creationflags=creation_flags)
+            else:
+                pythonw = Path(sys.executable).with_name("pythonw.exe")
+                launcher = pythonw if pythonw.exists() else Path(sys.executable)
+                subprocess.Popen([str(launcher), str(Path(__file__).resolve())], cwd=str(Path(__file__).parent), env=env, creationflags=creation_flags)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"App kon niet worden herstart:\n{exc}")
+            return
+
+        self.quit()
 
     def quit(self) -> None:
         self.remove_hotkey()
