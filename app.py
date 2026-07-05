@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -282,24 +282,43 @@ def current_exe_path() -> Path:
 
 def launch_update_script(downloaded_exe: Path) -> None:
     target = current_exe_path()
-    script = APP_DIR / "apply-update.cmd"
-    script.write_text(
+    current_pid = os.getpid()
+    log_path = APP_DIR / "update.log"
+    ps_script = APP_DIR / "apply-update.ps1"
+    cmd_script = APP_DIR / "apply-update.cmd"
+    ps_script.write_text(
+        "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                f"$Source = '{str(downloaded_exe).replace("'", "''")}'",
+                f"$Target = '{str(target).replace("'", "''")}'",
+                f"$Log = '{str(log_path).replace("'", "''")}'",
+                f"$PidToWait = {current_pid}",
+                "function Log($Message) { Add-Content -LiteralPath $Log -Value \"$(Get-Date -Format o) $Message\" }",
+                "try {",
+                "  Log \"Waiting for process $PidToWait to exit\"",
+                "  try { Wait-Process -Id $PidToWait -Timeout 30 -ErrorAction SilentlyContinue } catch {}",
+                "  Start-Sleep -Milliseconds 700",
+                "  Log \"Copying $Source to $Target\"",
+                "  Copy-Item -LiteralPath $Source -Destination $Target -Force",
+                "  Log \"Starting $Target\"",
+                "  Start-Process -FilePath $Target",
+                "  Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue",
+                "  Log \"Update complete\"",
+                "} catch {",
+                "  Log \"Update failed: $($_.Exception.Message)\"",
+                "}",
+                "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cmd_script.write_text(
         "\r\n".join(
             [
                 "@echo off",
-                "setlocal",
-                f'set "SOURCE={downloaded_exe}"',
-                f'set "TARGET={target}"',
-                ":wait",
-                f'tasklist /FI "IMAGENAME eq {APP_SLUG}.exe" | find /I "{APP_SLUG}.exe" >nul',
-                "if not errorlevel 1 (",
-                "  timeout /t 1 /nobreak >nul",
-                "  goto wait",
-                ")",
-                'copy /Y "%SOURCE%" "%TARGET%" >nul',
-                "if errorlevel 1 exit /b 1",
-                'start "" "%TARGET%"',
-                'del "%SOURCE%" >nul 2>nul',
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{ps_script}"',
                 'del "%~f0" >nul 2>nul',
                 "",
             ]
@@ -308,7 +327,7 @@ def launch_update_script(downloaded_exe: Path) -> None:
     )
 
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=creation_flags)
+    subprocess.Popen(["cmd.exe", "/c", str(cmd_script)], creationflags=creation_flags)
 
 
 def create_icon_image() -> Image.Image:
@@ -503,7 +522,8 @@ class StatusBubble:
         self.root = root
         self.on_click = on_click
         self.state = "idle"
-        self.size = 74
+        self.size = 60
+        self.hide_after_id = None
         self.window = Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -535,8 +555,11 @@ class StatusBubble:
         self.root.bind("<Configure>", lambda _event: self.position(), add="+")
 
         self.position()
-        self.set_state("idle")
-        self.window.deiconify()
+        self.set_state("idle", schedule_hide=False)
+
+    def c(self, *values: int) -> tuple[int, ...]:
+        scale = self.size / 74
+        return tuple(round(value * scale) for value in values)
 
     def position(self) -> None:
         try:
@@ -548,8 +571,37 @@ class StatusBubble:
         except Exception:
             pass
 
-    def set_state(self, state: str) -> None:
+    def show(self) -> None:
+        if self.hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.hide_after_id)
+            except Exception:
+                pass
+            self.hide_after_id = None
+        self.position()
+        self.window.deiconify()
+        self.window.lift()
+
+    def schedule_hide(self) -> None:
+        if self.hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.hide_after_id)
+            except Exception:
+                pass
+        self.hide_after_id = self.root.after(3000, self.hide)
+
+    def hide(self) -> None:
+        self.hide_after_id = None
+        try:
+            self.window.withdraw()
+        except Exception:
+            pass
+
+    def set_state(self, state: str, schedule_hide: bool = True) -> None:
         self.state = state
+        if state != "idle":
+            self.show()
+
         self.canvas.delete("all")
 
         colors = {
@@ -560,37 +612,45 @@ class StatusBubble:
         shadow = "#000000"
         outline, fill, tooltip = colors.get(state, colors["idle"])
 
-        self.canvas.create_oval(8, 8, 68, 68, fill=shadow, outline="", stipple="gray50")
-        self.canvas.create_oval(6, 4, 66, 64, fill=fill, outline=outline, width=2)
-        self.canvas.create_oval(12, 8, 36, 26, fill="#ffffff", outline="", stipple="gray25")
+        self.canvas.create_oval(*self.c(8, 8, 68, 68), fill=shadow, outline="", stipple="gray50")
+        self.canvas.create_oval(*self.c(6, 4, 66, 64), fill=fill, outline=outline, width=2)
+        self.canvas.create_oval(*self.c(12, 8, 36, 26), fill="#ffffff", outline="", stipple="gray25")
 
         if state == "processing":
             self.draw_processing_icon()
         else:
             self.draw_mic_icon()
             if state == "recording":
-                self.canvas.create_oval(47, 13, 57, 23, fill="#ffffff", outline="")
+                self.canvas.create_oval(*self.c(47, 13, 57, 23), fill="#ffffff", outline="")
 
         self.window.title(f"{APP_NAME} - {tooltip}")
         self.position()
+        if state == "idle" and schedule_hide:
+            self.schedule_hide()
 
     def draw_mic_icon(self) -> None:
-        self.canvas.create_rectangle(29, 25, 45, 35, fill="#ffffff", outline="")
-        self.canvas.create_oval(29, 17, 45, 33, fill="#ffffff", outline="")
-        self.canvas.create_oval(29, 31, 45, 47, fill="#ffffff", outline="")
-        self.canvas.create_line(24, 34, 24, 36, 25, 42, 30, 47, 37, 49, 44, 47, 49, 42, 50, 36, 50, 34, fill="#ffffff", width=3, smooth=True)
-        self.canvas.create_line(37, 49, 37, 56, fill="#ffffff", width=3)
-        self.canvas.create_line(30, 56, 44, 56, fill="#ffffff", width=3, capstyle="round")
+        self.canvas.create_rectangle(*self.c(29, 25, 45, 35), fill="#ffffff", outline="")
+        self.canvas.create_oval(*self.c(29, 17, 45, 33), fill="#ffffff", outline="")
+        self.canvas.create_oval(*self.c(29, 31, 45, 47), fill="#ffffff", outline="")
+        self.canvas.create_line(*self.c(24, 34, 24, 36, 25, 42, 30, 47, 37, 49, 44, 47, 49, 42, 50, 36, 50, 34), fill="#ffffff", width=3, smooth=True)
+        self.canvas.create_line(*self.c(37, 49, 37, 56), fill="#ffffff", width=3)
+        self.canvas.create_line(*self.c(30, 56, 44, 56), fill="#ffffff", width=3, capstyle="round")
 
     def draw_processing_icon(self) -> None:
-        self.canvas.create_line(24, 20, 50, 20, fill="#ffffff", width=4, capstyle="round")
-        self.canvas.create_line(28, 24, 46, 42, fill="#ffffff", width=4, capstyle="round")
-        self.canvas.create_line(46, 24, 28, 42, fill="#ffffff", width=4, capstyle="round")
-        self.canvas.create_line(24, 46, 50, 46, fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(*self.c(24, 20, 50, 20), fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(*self.c(28, 24, 46, 42), fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(*self.c(46, 24, 28, 42), fill="#ffffff", width=4, capstyle="round")
+        self.canvas.create_line(*self.c(24, 46, 50, 46), fill="#ffffff", width=4, capstyle="round")
         for x in (28, 37, 46):
-            self.canvas.create_oval(x - 2, 55, x + 2, 59, fill="#ffffff", outline="")
+            self.canvas.create_oval(*self.c(x - 2, 55, x + 2, 59), fill="#ffffff", outline="")
 
     def destroy(self) -> None:
+        if self.hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.hide_after_id)
+            except Exception:
+                pass
+            self.hide_after_id = None
         try:
             self.window.destroy()
         except Exception:
