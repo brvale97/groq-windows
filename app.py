@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.12"
+APP_VERSION = "0.1.13"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -844,7 +844,11 @@ class StatusBubble:
         self.state = state
         self.stop_spinner()
         self.stop_wave()
-        self.window_width = 176 if state == "recording" else 142 if state == "processing" else self.button_size
+        if state == "idle" and schedule_hide:
+            self.hide()
+            return
+
+        self.window_width = 176 if state == "recording" else 162 if state == "processing" else self.button_size
         self.window_height = 48 if state in {"recording", "processing"} else self.button_size
         self.canvas.configure(width=self.window_width, height=self.window_height)
         if state != "idle":
@@ -917,12 +921,12 @@ class StatusBubble:
             width=3,
         )
         self.canvas.create_text(
-            45,
+            43,
             24,
             text="Transcriberen",
             fill="#a11b28",
             anchor="w",
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 8, "bold"),
         )
 
     def draw_recording_pill(self) -> None:
