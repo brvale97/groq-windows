@@ -196,17 +196,30 @@ def create_icon_image() -> Image.Image:
     return image
 
 
-def make_tone(path: Path, notes: list[tuple[float, int]], volume: float = 0.22) -> None:
+def make_tone(path: Path, notes: list[float]) -> None:
     sample_rate = 44_100
+    note_duration = 0.09
+    note_gap = 0.025
+    attack_time = 0.015
+    max_gain = 0.2
+    note_samples = int(note_duration * sample_rate)
+    gap_samples = int(note_gap * sample_rate)
     samples: list[int] = []
-    for freq, duration_ms in notes:
-        count = int(sample_rate * duration_ms / 1000)
-        for i in range(count):
-            attack = min(1.0, i / max(1, int(sample_rate * 0.018)))
-            release = min(1.0, (count - i) / max(1, int(sample_rate * 0.035)))
-            envelope = min(attack, release)
-            value = math.sin(2 * math.pi * freq * (i / sample_rate))
-            samples.append(int(value * envelope * volume * 32767))
+
+    for note_index, freq in enumerate(notes):
+        decay_duration = note_duration - attack_time
+        for i in range(note_samples):
+            t = i / sample_rate
+            sine = math.sin(2 * math.pi * freq * t)
+            if t < attack_time:
+                envelope = (t / attack_time) * max_gain
+            else:
+                decay_progress = (t - attack_time) / decay_duration
+                envelope = max_gain * math.pow(0.0001 / max_gain, decay_progress)
+            samples.append(int(sine * envelope * 32767))
+
+        if note_index < len(notes) - 1:
+            samples.extend([0] * gap_samples)
 
     with wave.open(str(path), "wb") as wav:
         wav.setnchannels(1)
@@ -217,16 +230,19 @@ def make_tone(path: Path, notes: list[tuple[float, int]], volume: float = 0.22) 
 
 def ensure_sounds() -> None:
     SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+    marker = SOUNDS_DIR / ".groqandroid-cues-v1"
     sounds = {
-        "start.wav": [(523.25, 55), (659.25, 80)],
-        "processing.wav": [(659.25, 45), (493.88, 75)],
-        "success.wav": [(587.33, 55), (783.99, 85), (987.77, 90)],
-        "error.wav": [(246.94, 120), (196.00, 150)],
+        "start.wav": [523.25, 659.25],
+        "processing.wav": [587.33, 440.0],
+        "success.wav": [587.33, 440.0],
+        "error.wav": [246.94, 196.00],
     }
+
     for filename, notes in sounds.items():
         path = SOUNDS_DIR / filename
-        if not path.exists():
+        if not path.exists() or not marker.exists():
             make_tone(path, notes)
+    marker.write_text("Generated from GroqAndroid cue parameters.\n", encoding="utf-8")
 
 
 def play_sound(name: str) -> None:
