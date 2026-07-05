@@ -23,7 +23,7 @@ import pyperclip
 import pystray
 import sounddevice as sd
 from groq import Groq
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 try:
     import winsound
@@ -33,12 +33,25 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
 KEYRING_USER = "groq_api_key"
 _INSTANCE_MUTEX_HANDLE = None
+MIN_TRANSCRIPTION_SECONDS = 1.0
+MIN_TRANSCRIPTION_BYTES = 32_000
+
+ANDROID_MIC_PATH = (
+    "M12,14c1.66,0 3,-1.34 3,-3L15,5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6c0,1.66 1.34,3 3,3z"
+    "M17.3,11c0,3 -2.54,5.1 -5.3,5.1S6.7,14 6.7,11L5,11c0,3.41 2.72,6.23 6,6.72L11,21h2v-3.28"
+    "c3.28,-0.48 6,-3.3 6,-6.72L17.3,11z"
+)
+BUBBLE_COLORS = {
+    "idle": "#2196F3",
+    "recording": "#F44336",
+    "processing": "#FF9800",
+}
 
 
 def app_data_dir() -> Path:
@@ -340,6 +353,189 @@ def create_icon_image() -> Image.Image:
     return image
 
 
+def hex_to_rgba(value: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    value = value.lstrip("#")
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16), alpha)
+
+
+def tokenize_svg_path(path_data: str) -> list[str]:
+    tokens: list[str] = []
+    i = 0
+    while i < len(path_data):
+        char = path_data[i]
+        if char.isalpha():
+            tokens.append(char)
+            i += 1
+            continue
+        if char in " ,\n\r\t":
+            i += 1
+            continue
+
+        start = i
+        i += 1
+        while i < len(path_data):
+            current = path_data[i]
+            previous = path_data[i - 1]
+            if current.isalpha() or current in " ,\n\r\t":
+                break
+            if current in "+-" and previous not in "eE":
+                break
+            i += 1
+        tokens.append(path_data[start:i])
+    return tokens
+
+
+def cubic_point(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    t: float,
+) -> tuple[float, float]:
+    mt = 1 - t
+    return (
+        mt**3 * p0[0] + 3 * mt**2 * t * p1[0] + 3 * mt * t**2 * p2[0] + t**3 * p3[0],
+        mt**3 * p0[1] + 3 * mt**2 * t * p1[1] + 3 * mt * t**2 * p2[1] + t**3 * p3[1],
+    )
+
+
+def render_svg_path_mask(path_data: str, size: int, viewport: float = 24.0) -> Image.Image:
+    tokens = tokenize_svg_path(path_data)
+    paths: list[list[tuple[float, float]]] = []
+    path: list[tuple[float, float]] = []
+    current = (0.0, 0.0)
+    start = (0.0, 0.0)
+    last_control: tuple[float, float] | None = None
+    command = ""
+    index = 0
+
+    def is_command(token: str) -> bool:
+        return len(token) == 1 and token.isalpha()
+
+    def read_float() -> float:
+        nonlocal index
+        value = float(tokens[index])
+        index += 1
+        return value
+
+    def add_point(point: tuple[float, float]) -> None:
+        nonlocal current
+        path.append(point)
+        current = point
+
+    while index < len(tokens):
+        if is_command(tokens[index]):
+            command = tokens[index]
+            index += 1
+
+        lower = command.lower()
+        relative = command.islower()
+
+        if lower == "m":
+            first = True
+            while index < len(tokens) and not is_command(tokens[index]):
+                x, y = read_float(), read_float()
+                point = (current[0] + x, current[1] + y) if relative else (x, y)
+                if first:
+                    if path:
+                        paths.append(path)
+                    path = [point]
+                    current = point
+                    start = point
+                    first = False
+                else:
+                    add_point(point)
+                last_control = None
+            command = "l" if relative else "L"
+        elif lower == "l":
+            while index < len(tokens) and not is_command(tokens[index]):
+                x, y = read_float(), read_float()
+                add_point((current[0] + x, current[1] + y) if relative else (x, y))
+            last_control = None
+        elif lower == "h":
+            while index < len(tokens) and not is_command(tokens[index]):
+                x = read_float()
+                add_point((current[0] + x, current[1]) if relative else (x, current[1]))
+            last_control = None
+        elif lower == "v":
+            while index < len(tokens) and not is_command(tokens[index]):
+                y = read_float()
+                add_point((current[0], current[1] + y) if relative else (current[0], y))
+            last_control = None
+        elif lower == "c":
+            while index < len(tokens) and not is_command(tokens[index]):
+                x1, y1, x2, y2, x3, y3 = (read_float(), read_float(), read_float(), read_float(), read_float(), read_float())
+                p1 = (current[0] + x1, current[1] + y1) if relative else (x1, y1)
+                p2 = (current[0] + x2, current[1] + y2) if relative else (x2, y2)
+                p3 = (current[0] + x3, current[1] + y3) if relative else (x3, y3)
+                p0 = current
+                for step in range(1, 25):
+                    path.append(cubic_point(p0, p1, p2, p3, step / 24))
+                current = p3
+                last_control = p2
+        elif lower == "s":
+            while index < len(tokens) and not is_command(tokens[index]):
+                x2, y2, x3, y3 = read_float(), read_float(), read_float(), read_float()
+                if last_control is None:
+                    p1 = current
+                else:
+                    p1 = (2 * current[0] - last_control[0], 2 * current[1] - last_control[1])
+                p2 = (current[0] + x2, current[1] + y2) if relative else (x2, y2)
+                p3 = (current[0] + x3, current[1] + y3) if relative else (x3, y3)
+                p0 = current
+                for step in range(1, 25):
+                    path.append(cubic_point(p0, p1, p2, p3, step / 24))
+                current = p3
+                last_control = p2
+        elif lower == "z":
+            if path:
+                path.append(start)
+                paths.append(path)
+                path = []
+            current = start
+            last_control = None
+        else:
+            raise ValueError(f"Unsupported SVG path command: {command}")
+
+    if path:
+        paths.append(path)
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    scale = size / viewport
+    for subpath in paths:
+        points = [(round(x * scale), round(y * scale)) for x, y in subpath]
+        draw.polygon(points, fill=255)
+    return mask
+
+
+def create_bubble_image(state: str, size: int) -> Image.Image:
+    render_scale = 4
+    work_size = size * render_scale
+
+    def p(value: float) -> int:
+        return round((value / 60) * work_size)
+
+    image = Image.new("RGBA", (work_size, work_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    color = hex_to_rgba(BUBBLE_COLORS.get(state, BUBBLE_COLORS["idle"]))
+
+    draw.ellipse((p(6), p(8), p(56), p(58)), fill=(0, 0, 0, 58))
+    draw.ellipse((p(4), p(2), p(56), p(54)), fill=color)
+    draw.ellipse((p(12), p(7), p(32), p(18)), fill=(255, 255, 255, 42))
+
+    icon_size = p(30)
+    icon = Image.new("RGBA", (icon_size, icon_size), (255, 255, 255, 0))
+    icon.putalpha(render_svg_path_mask(ANDROID_MIC_PATH, icon_size))
+    image.alpha_composite(icon, (p(15), p(13)))
+
+    if state == "recording":
+        draw.ellipse((p(43), p(10), p(52), p(19)), fill=(255, 255, 255, 235))
+
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    return image.resize((size, size), resample)
+
+
 def make_tone(path: Path, notes: list[float]) -> None:
     sample_rate = 44_100
     note_duration = 0.09
@@ -523,6 +719,9 @@ class StatusBubble:
         self.on_click = on_click
         self.state = "idle"
         self.size = 60
+        self.window_width = self.size
+        self.window_height = self.size
+        self.images: dict[str, ImageTk.PhotoImage] = {}
         self.hide_after_id = None
         self.window = Toplevel(root)
         self.window.withdraw()
@@ -554,20 +753,19 @@ class StatusBubble:
         self.window.bind("<Button-1>", lambda _event: self.on_click())
         self.root.bind("<Configure>", lambda _event: self.position(), add="+")
 
+        for state in ("idle", "recording", "processing"):
+            self.images[state] = ImageTk.PhotoImage(create_bubble_image(state, self.size))
+
         self.position()
         self.set_state("idle", schedule_hide=False)
-
-    def c(self, *values: int) -> tuple[int, ...]:
-        scale = self.size / 74
-        return tuple(round(value * scale) for value in values)
 
     def position(self) -> None:
         try:
             screen_width = self.window.winfo_screenwidth()
             screen_height = self.window.winfo_screenheight()
-            x = max(0, screen_width - self.size - 26)
-            y = max(0, screen_height - self.size - 82)
-            self.window.geometry(f"{self.size}x{self.size}+{x}+{y}")
+            x = max(0, screen_width - self.window_width - 26)
+            y = max(0, screen_height - self.window_height - 82)
+            self.window.geometry(f"{self.window_width}x{self.window_height}+{x}+{y}")
         except Exception:
             pass
 
@@ -599,50 +797,60 @@ class StatusBubble:
 
     def set_state(self, state: str, schedule_hide: bool = True) -> None:
         self.state = state
+        self.window_width = self.size
+        self.window_height = self.size
+        self.canvas.configure(width=self.window_width, height=self.window_height)
         if state != "idle":
             self.show()
 
         self.canvas.delete("all")
 
-        colors = {
-            "idle": ("#0f766e", "#14b8a6", "Klaar"),
-            "recording": ("#b91c1c", "#ef4444", "Opname"),
-            "processing": ("#a16207", "#f59e0b", "Transcriptie"),
+        tooltips = {
+            "idle": "Klaar",
+            "recording": "Opname",
+            "processing": "Transcriptie",
         }
-        shadow = "#000000"
-        outline, fill, tooltip = colors.get(state, colors["idle"])
-
-        self.canvas.create_oval(*self.c(8, 8, 68, 68), fill=shadow, outline="", stipple="gray50")
-        self.canvas.create_oval(*self.c(6, 4, 66, 64), fill=fill, outline=outline, width=2)
-        self.canvas.create_oval(*self.c(12, 8, 36, 26), fill="#ffffff", outline="", stipple="gray25")
-
-        if state == "processing":
-            self.draw_processing_icon()
-        else:
-            self.draw_mic_icon()
-            if state == "recording":
-                self.canvas.create_oval(*self.c(47, 13, 57, 23), fill="#ffffff", outline="")
-
+        image = self.images.get(state, self.images["idle"])
+        self.canvas.create_image(self.size // 2, self.size // 2, image=image)
+        tooltip = tooltips.get(state, tooltips["idle"])
         self.window.title(f"{APP_NAME} - {tooltip}")
         self.position()
         if state == "idle" and schedule_hide:
             self.schedule_hide()
 
-    def draw_mic_icon(self) -> None:
-        self.canvas.create_rectangle(*self.c(29, 25, 45, 35), fill="#ffffff", outline="")
-        self.canvas.create_oval(*self.c(29, 17, 45, 33), fill="#ffffff", outline="")
-        self.canvas.create_oval(*self.c(29, 31, 45, 47), fill="#ffffff", outline="")
-        self.canvas.create_line(*self.c(24, 34, 24, 36, 25, 42, 30, 47, 37, 49, 44, 47, 49, 42, 50, 36, 50, 34), fill="#ffffff", width=3, smooth=True)
-        self.canvas.create_line(*self.c(37, 49, 37, 56), fill="#ffffff", width=3)
-        self.canvas.create_line(*self.c(30, 56, 44, 56), fill="#ffffff", width=3, capstyle="round")
+    def show_notice(self, message: str) -> None:
+        self.state = "notice"
+        self.window_width = 190
+        self.window_height = self.size
+        self.canvas.configure(width=self.window_width, height=self.window_height)
+        self.show()
+        self.canvas.delete("all")
 
-    def draw_processing_icon(self) -> None:
-        self.canvas.create_line(*self.c(24, 20, 50, 20), fill="#ffffff", width=4, capstyle="round")
-        self.canvas.create_line(*self.c(28, 24, 46, 42), fill="#ffffff", width=4, capstyle="round")
-        self.canvas.create_line(*self.c(46, 24, 28, 42), fill="#ffffff", width=4, capstyle="round")
-        self.canvas.create_line(*self.c(24, 46, 50, 46), fill="#ffffff", width=4, capstyle="round")
-        for x in (28, 37, 46):
-            self.canvas.create_oval(*self.c(x - 2, 55, x + 2, 59), fill="#ffffff", outline="")
+        x1, y1 = 4, 4
+        x2, y2 = self.window_width - 4, self.window_height - 6
+        radius = 22
+        self.draw_round_rect(x1 + 2, y1 + 4, x2 + 2, y2 + 4, radius, "#000000")
+        self.draw_round_rect(x1, y1, x2, y2, radius, BUBBLE_COLORS["processing"])
+        self.canvas.create_oval(14, 16, 42, 44, fill="#ffffff", outline="")
+        self.canvas.create_text(28, 30, text="!", fill=BUBBLE_COLORS["processing"], font=("Segoe UI", 17, "bold"))
+        self.canvas.create_text(
+            52,
+            30,
+            text=message,
+            fill="#ffffff",
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.window.title(f"{APP_NAME} - {message}")
+        self.schedule_hide()
+
+    def draw_round_rect(self, x1: int, y1: int, x2: int, y2: int, radius: int, fill: str) -> None:
+        self.canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
+        self.canvas.create_rectangle(x1, y1 + radius, x2, y2 - radius, fill=fill, outline="")
+        self.canvas.create_oval(x1, y1, x1 + radius * 2, y1 + radius * 2, fill=fill, outline="")
+        self.canvas.create_oval(x2 - radius * 2, y1, x2, y1 + radius * 2, fill=fill, outline="")
+        self.canvas.create_oval(x1, y2 - radius * 2, x1 + radius * 2, y2, fill=fill, outline="")
+        self.canvas.create_oval(x2 - radius * 2, y2 - radius * 2, x2, y2, fill=fill, outline="")
 
     def destroy(self) -> None:
         if self.hide_after_id is not None:
@@ -802,10 +1010,18 @@ class DictationEngine:
     def transcribe_and_output(self) -> None:
         wav_path: Path | None = None
         started_at = time.perf_counter()
+        show_idle_bubble = True
         try:
             wav_path = self.write_wav()
             duration, peak, rms = self.audio_stats()
             self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
+            if duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES:
+                self.notify("Transcriptie te kort. Er is niets geplakt.")
+                self.emit_state("too_short")
+                play_sound("error.wav")
+                show_idle_bubble = False
+                return
+
             if peak < 0.01:
                 self.notify("Waarschuwing: bijna geen inputvolume gemeten. Check microfoon/device.")
 
@@ -845,7 +1061,8 @@ class DictationEngine:
                     pass
             with self.lock:
                 self.state = "idle"
-            self.emit_state("idle")
+            if show_idle_bubble:
+                self.emit_state("idle")
             self.notify("Klaar. Druk op Insert voor een nieuwe opname.")
 
     def transcribe(self, wav_path: Path) -> str:
@@ -904,7 +1121,10 @@ class TrayApp:
             pass
 
     def set_engine_state(self, state: str) -> None:
-        self.root.after(0, lambda: self.bubble.set_state(state))
+        if state == "too_short":
+            self.root.after(0, lambda: self.bubble.show_notice("Transcriptie te kort"))
+        else:
+            self.root.after(0, lambda: self.bubble.set_state(state))
 
     def install_hotkey(self) -> None:
         self.remove_hotkey()
