@@ -345,11 +345,39 @@ def hotkey_from_tk_event(event) -> str | None:
         parts.append("ctrl")
     if event.state & 0x0001:
         parts.append("shift")
-    if event.state & 0x0008 or event.state & 0x0080 or event.state & 0x20000:
+    # Tk on Windows uses extra state bits for extended keys like Delete.
+    # Treat only Mod1 as Alt; otherwise bare Delete can be misread as Alt+Delete.
+    if event.state & 0x0008:
         parts.append("alt")
 
     parts.append(key)
     return "+".join(dict.fromkeys(parts))
+
+
+def normalize_hotkey_text(value: str) -> str:
+    aliases = {
+        "del": "delete",
+        "esc": "esc",
+        "escape": "esc",
+        "control": "ctrl",
+        "ctl": "ctrl",
+        "option": "alt",
+        "win": "windows",
+        "cmd": "windows",
+        "return": "enter",
+        "pgup": "page up",
+        "pgdn": "page down",
+    }
+    parts = [
+        aliases.get(part.strip().lower(), part.strip().lower())
+        for part in value.replace("-", "+").split("+")
+        if part.strip()
+    ]
+    return "+".join(dict.fromkeys(parts))
+
+
+def validate_hotkey(value: str) -> None:
+    keyboard.parse_hotkey(value)
 
 
 def remove_final_sentence_period(text: str) -> str:
@@ -656,7 +684,7 @@ class TrayApp:
         shortcut_frame = ttk.Frame(frame)
         shortcut_frame.grid(row=4, column=1, sticky="ew", pady=6)
         shortcut_frame.columnconfigure(0, weight=1)
-        ttk.Entry(shortcut_frame, textvariable=shortcut, state="readonly").grid(row=0, column=0, sticky="ew")
+        ttk.Entry(shortcut_frame, textvariable=shortcut).grid(row=0, column=0, sticky="ew")
         capture_button = ttk.Button(shortcut_frame, text="Wijzig")
         capture_button.grid(row=0, column=1, padx=(8, 0))
 
@@ -730,17 +758,25 @@ class TrayApp:
             if selected_device and not selected_device_id and selected_device.split(":", 1)[0].isdigit():
                 selected_device_id = selected_device.split(":", 1)[0]
 
-            self.config = Config(
+            normalized_shortcut = normalize_hotkey_text(shortcut.get()) or "insert"
+            try:
+                validate_hotkey(normalized_shortcut)
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Shortcut wordt niet herkend:\n{normalized_shortcut}\n\n{exc}")
+                return
+
+            new_config = Config(
                 api_key=api_key.get().strip(),
                 model=model.get().strip() or "whisper-large-v3-turbo",
                 language=language.get().strip(),
                 prompt=prompt.get().strip(),
-                shortcut=shortcut.get().strip() or "insert",
+                shortcut=normalized_shortcut,
                 input_device=selected_device_id,
                 paste_after_transcription=paste.get(),
                 autostart=autostart_var.get(),
             )
             try:
+                self.config = new_config
                 save_config(self.config)
                 set_autostart(self.config.autostart)
                 self.engine.update_config(self.config)
