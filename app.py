@@ -33,14 +33,16 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.13"
+APP_VERSION = "0.1.14"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
 KEYRING_USER = "groq_api_key"
 _INSTANCE_MUTEX_HANDLE = None
+_INSTANCE_LOCK_FILE = None
 MIN_TRANSCRIPTION_SECONDS = 1.0
 MIN_TRANSCRIPTION_BYTES = 32_000
+POST_STOP_RECORDING_SECONDS = 0.15
 
 ANDROID_MIC_PATH = (
     "M12,14c1.66,0 3,-1.34 3,-3L15,5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6c0,1.66 1.34,3 3,3z"
@@ -81,11 +83,45 @@ def acquire_single_instance_lock() -> bool:
         return True
 
     import ctypes
+    import ctypes.wintypes
+    import msvcrt
 
-    global _INSTANCE_MUTEX_HANDLE
+    global _INSTANCE_MUTEX_HANDLE, _INSTANCE_LOCK_FILE
+
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = APP_DIR / "instance.lock"
+    _INSTANCE_LOCK_FILE = lock_path.open("a+b")
+    try:
+        _INSTANCE_LOCK_FILE.seek(0)
+        msvcrt.locking(_INSTANCE_LOCK_FILE.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        _INSTANCE_LOCK_FILE.close()
+        _INSTANCE_LOCK_FILE = None
+        return False
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _INSTANCE_MUTEX_HANDLE = kernel32.CreateMutexW(None, False, f"Local\\{APP_SLUG}SingleInstance")
-    return ctypes.get_last_error() != 183
+    kernel32.SetLastError.argtypes = [ctypes.wintypes.DWORD]
+    kernel32.SetLastError.restype = None
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+    kernel32.SetLastError(0)
+    _INSTANCE_MUTEX_HANDLE = kernel32.CreateMutexW(None, True, f"Local\\{APP_SLUG}SingleInstance")
+    if not _INSTANCE_MUTEX_HANDLE:
+        _INSTANCE_LOCK_FILE.close()
+        _INSTANCE_LOCK_FILE = None
+        return False
+
+    if ctypes.get_last_error() == 183:
+        kernel32.CloseHandle(_INSTANCE_MUTEX_HANDLE)
+        _INSTANCE_MUTEX_HANDLE = None
+        _INSTANCE_LOCK_FILE.close()
+        _INSTANCE_LOCK_FILE = None
+        return False
+
+    return True
 
 
 @dataclass
@@ -1111,6 +1147,7 @@ class DictationEngine:
         self.emit_state("processing")
 
         if self.stream is not None:
+            time.sleep(POST_STOP_RECORDING_SECONDS)
             self.stream.stop()
             self.stream.close()
             self.stream = None
