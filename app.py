@@ -23,7 +23,7 @@ import pyperclip
 import pystray
 import sounddevice as sd
 from groq import Groq
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw
 
 try:
     import winsound
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.1.10"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -48,9 +48,9 @@ ANDROID_MIC_PATH = (
     "c3.28,-0.48 6,-3.3 6,-6.72L17.3,11z"
 )
 BUBBLE_COLORS = {
-    "idle": "#2196F3",
-    "recording": "#F44336",
-    "processing": "#FF9800",
+    "idle": "#E81123",
+    "recording": "#ff2e3d",
+    "processing": "#E81123",
 }
 
 
@@ -719,11 +719,12 @@ class StatusBubble:
         self.root = root
         self.on_click = on_click
         self.state = "idle"
-        self.size = 60
+        self.size = 48
         self.window_width = self.size
         self.window_height = self.size
-        self.images: dict[str, ImageTk.PhotoImage] = {}
         self.hide_after_id = None
+        self.spinner_after_id = None
+        self.spinner_angle = 0
         self.window = Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -753,9 +754,6 @@ class StatusBubble:
         self.canvas.bind("<Button-1>", lambda _event: self.on_click())
         self.window.bind("<Button-1>", lambda _event: self.on_click())
         self.root.bind("<Configure>", lambda _event: self.position(), add="+")
-
-        for state in ("idle", "recording", "processing"):
-            self.images[state] = ImageTk.PhotoImage(create_bubble_image(state, self.size))
 
         self.position()
         self.set_state("idle", schedule_hide=False)
@@ -789,6 +787,27 @@ class StatusBubble:
                 pass
         self.hide_after_id = self.root.after(3000, self.hide)
 
+    def stop_spinner(self) -> None:
+        if self.spinner_after_id is not None:
+            try:
+                self.root.after_cancel(self.spinner_after_id)
+            except Exception:
+                pass
+            self.spinner_after_id = None
+
+    def start_spinner(self) -> None:
+        self.stop_spinner()
+
+        def tick() -> None:
+            if self.state != "processing":
+                self.spinner_after_id = None
+                return
+            self.spinner_angle = (self.spinner_angle + 32) % 360
+            self.draw_processing_button()
+            self.spinner_after_id = self.root.after(70, tick)
+
+        tick()
+
     def hide(self) -> None:
         self.hide_after_id = None
         try:
@@ -798,6 +817,7 @@ class StatusBubble:
 
     def set_state(self, state: str, schedule_hide: bool = True) -> None:
         self.state = state
+        self.stop_spinner()
         self.window_width = self.size
         self.window_height = self.size
         self.canvas.configure(width=self.window_width, height=self.window_height)
@@ -811,8 +831,11 @@ class StatusBubble:
             "recording": "Opname",
             "processing": "Transcriptie",
         }
-        image = self.images.get(state, self.images["idle"])
-        self.canvas.create_image(self.size // 2, self.size // 2, image=image)
+        if state == "processing":
+            self.draw_processing_button()
+            self.start_spinner()
+        else:
+            self.draw_mic_button(state)
         tooltip = tooltips.get(state, tooltips["idle"])
         self.window.title(f"{APP_NAME} - {tooltip}")
         self.position()
@@ -820,23 +843,20 @@ class StatusBubble:
             self.schedule_hide()
 
     def show_notice(self, message: str) -> None:
+        self.stop_spinner()
         self.state = "notice"
-        self.window_width = 190
+        self.window_width = 176
         self.window_height = self.size
         self.canvas.configure(width=self.window_width, height=self.window_height)
         self.show()
         self.canvas.delete("all")
 
-        x1, y1 = 4, 4
-        x2, y2 = self.window_width - 4, self.window_height - 6
-        radius = 22
-        self.draw_round_rect(x1 + 2, y1 + 4, x2 + 2, y2 + 4, radius, "#000000")
-        self.draw_round_rect(x1, y1, x2, y2, radius, BUBBLE_COLORS["processing"])
-        self.canvas.create_oval(14, 16, 42, 44, fill="#ffffff", outline="")
-        self.canvas.create_text(28, 30, text="!", fill=BUBBLE_COLORS["processing"], font=("Segoe UI", 17, "bold"))
+        self.draw_round_rect(0, 0, self.window_width - 1, self.window_height - 1, 14, BUBBLE_COLORS["idle"])
+        self.canvas.create_oval(11, 11, 37, 37, fill="#ffffff", outline="")
+        self.canvas.create_text(24, 24, text="!", fill=BUBBLE_COLORS["idle"], font=("Segoe UI", 16, "bold"))
         self.canvas.create_text(
-            52,
-            30,
+            46,
+            24,
             text=message,
             fill="#ffffff",
             anchor="w",
@@ -844,6 +864,56 @@ class StatusBubble:
         )
         self.window.title(f"{APP_NAME} - {message}")
         self.schedule_hide()
+
+    def draw_mic_button(self, state: str) -> None:
+        color = BUBBLE_COLORS["recording"] if state == "recording" else BUBBLE_COLORS["idle"]
+        if state == "idle":
+            self.draw_round_rect(5, 5, self.size - 5, self.size - 5, 11, color)
+        else:
+            self.canvas.create_oval(4, 4, self.size - 4, self.size - 4, fill=color, outline="")
+        self.draw_mic_icon()
+
+    def draw_processing_button(self) -> None:
+        self.canvas.delete("all")
+        self.canvas.create_oval(4, 4, self.size - 4, self.size - 4, fill=BUBBLE_COLORS["recording"], outline="")
+        self.canvas.create_oval(15, 15, 33, 33, outline="#ffffff", width=2)
+        self.canvas.create_arc(
+            14,
+            14,
+            34,
+            34,
+            start=self.spinner_angle,
+            extent=105,
+            style="arc",
+            outline="#ffffff",
+            width=4,
+        )
+
+    def draw_mic_icon(self) -> None:
+        self.canvas.create_line(24, 14, 24, 27, fill="#ffffff", width=8, capstyle="round")
+        self.canvas.create_line(
+            14,
+            25,
+            14,
+            28,
+            16,
+            34,
+            24,
+            37,
+            32,
+            34,
+            34,
+            28,
+            34,
+            25,
+            fill="#ffffff",
+            width=3,
+            capstyle="round",
+            joinstyle="round",
+            smooth=True,
+        )
+        self.canvas.create_line(24, 37, 24, 42, fill="#ffffff", width=3, capstyle="round")
+        self.canvas.create_line(19, 42, 29, 42, fill="#ffffff", width=3, capstyle="round")
 
     def draw_round_rect(self, x1: int, y1: int, x2: int, y2: int, radius: int, fill: str) -> None:
         self.canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
@@ -854,6 +924,7 @@ class StatusBubble:
         self.canvas.create_oval(x2 - radius * 2, y2 - radius * 2, x2, y2, fill=fill, outline="")
 
     def destroy(self) -> None:
+        self.stop_spinner()
         if self.hide_after_id is not None:
             try:
                 self.root.after_cancel(self.hide_after_id)
