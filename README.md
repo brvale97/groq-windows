@@ -1,58 +1,71 @@
-# Groq Insert Dictation
+# Groq Windows Dictation
 
-Kleine Windows dictation app:
+A small dictation app for Windows:
 
-- `Insert` start opname.
-- `Insert` stopt opname.
-- Audio gaat naar Groq Speech-to-Text met `whisper-large-v3-turbo`.
-- Transcriptie wordt altijd naar je klembord gezet.
-- Daarna wordt de tekst automatisch geplakt in het actieve venster.
-- Instellingen zitten in een tray-app, inclusief Groq API key, microfoon en autostart.
-- De app checkt GitHub Releases op updates en kan zichzelf bijwerken zonder je API key of instellingen te wissen.
-- Rechtsonder verschijnt tijdens gebruik een klein statusicoon: opnemen, transcriberen, en daarna nog 3 seconden klaar.
+- The configured shortcut starts recording.
+- Pressing the shortcut again stops recording.
+- Audio is sent to Groq Speech-to-Text using `whisper-large-v3-turbo`.
+- The transcript is always copied to your clipboard.
+- The text is then pasted automatically into the active window.
+- Settings are managed from the system tray, including the Groq API key, microphone, customizable shortcut, and automatic startup.
+- You can add names and terms such as `Groq` and `Clinon` with the correct spelling to your personal dictionary.
+- Explicit word replacements can correct known variants such as `Grok` or `Grog` to `Groq` after transcription.
+- The app checks GitHub Releases for updates and can update itself without deleting your API key or settings.
+- A small status icon appears in the bottom-right corner while the app is in use: recording, transcribing, and then ready for another 3 seconds.
 
 ## Setup
 
-Voor development:
+For development:
 
 ```powershell
 .\run.ps1
 ```
 
-Voor normaal gebruik bouw je een Windows app:
+For normal use, build the Windows app:
 
 ```powershell
-.\.venv\Scripts\python.exe -m PyInstaller --noconsole --onefile --name GroqInsertDictation app.py
+.\build-app.ps1
 ```
 
-Daarna staat de app in `dist\GroqInsertDictation.exe`.
+The resulting app is written to `dist\GroqInsertDictation.exe`.
 
-Installeren naar je gebruikersprofiel en autostart instellen:
+To install it in your user profile and enable automatic startup:
 
 ```powershell
 .\install-app.ps1
 ```
 
-Dat kopieert de app naar `%LOCALAPPDATA%\Programs\GroqInsertDictation\GroqInsertDictation.exe`.
+This copies the app to `%LOCALAPPDATA%\Programs\GroqInsertDictation\GroqInsertDictation.exe`.
 
-De eerste keer opent de app Instellingen. Vul je Groq API key in, kies eventueel je microfoon, en laat autostart aan staan.
+The Settings window opens the first time you run the app. Enter your Groq API key, optionally select a microphone, configure the shortcut if desired, and leave automatic startup enabled.
 
-## Instellingen
+To run the tests:
 
-Instellingen worden opgeslagen in `%APPDATA%\GroqInsertDictation\settings.json`. De API key wordt in Windows Credential Manager gezet als dat lukt.
+```powershell
+.\bootstrap.ps1 -Profile runtime
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
-- `GROQ_MODEL=whisper-large-v3-turbo` voor maximale snelheid.
-- `GROQ_MODEL=whisper-large-v3` voor hogere nauwkeurigheid.
-- `GROQ_LANGUAGE=nl` voor Nederlands; laat leeg voor autodetect.
-- `DICTATION_INPUT_DEVICE=11` om een specifieke microfoon te kiezen uit de startup-lijst.
-- `PASTE_AFTER_TRANSCRIPTION=false` als je alleen het klembord wilt vullen.
+## Settings
 
-`.env` werkt nog als fallback/migratie, maar is niet meer nodig voor normaal gebruik.
+Settings are stored in `%APPDATA%\GroqInsertDictation\settings.json`. The API key is stored in Windows Credential Manager whenever possible.
+
+Open the personal dictionary from Settings to add names, jargon, and terms that are often transcribed with the wrong spelling. The app sends these terms as spelling context in the same Groq transcription request. Because Whisper treats that context as a hint rather than a guarantee, add known mistakes such as `Grok → Groq` or `Grog → Groq` in the **Replacements** section directly below the dictionary. Replacements are applied locally after transcription and before the text is copied or pasted. The existing free-form **Prompt** field continues to work alongside the dictionary.
+
+- `GROQ_MODEL=whisper-large-v3-turbo` for maximum speed.
+- `GROQ_MODEL=whisper-large-v3` for higher accuracy.
+- `GROQ_LANGUAGE=nl` for Dutch; leave it empty to use automatic language detection.
+- `DICTATION_INPUT_DEVICE=11` to select a specific microphone from the startup list.
+- `PASTE_AFTER_TRANSCRIPTION=false` to copy the transcript to the clipboard without pasting it automatically.
+
+`.env` remains available as a fallback and migration path, but is no longer required for normal use.
+
+Runtime and build dependencies are kept separately in `requirements.txt` and `requirements-build.txt`. The PowerShell scripts reinstall them only when the Python version or dependency files have changed.
 
 ## Updates
 
-De app controleert bij het starten of er een nieuwere GitHub Release beschikbaar is. Als er een update is, verschijnt er een venster met een updateknop. De updater vervangt alleen de exe; instellingen en API key blijven in `%APPDATA%` en Windows Credential Manager staan.
+The app checks for a newer GitHub Release when it starts. If an update is available, a window with an update button appears. The updater replaces only the executable; your settings and API key remain in `%APPDATA%` and Windows Credential Manager.
 
-## Opmerking
+## Note
 
-De app gebruikt plakken via `Ctrl+V` in plaats van letter-voor-letter typen. Dat is sneller en werkt beter met Nederlandse tekens, interpunctie en langere tekst. Omdat het transcript eerst naar het klembord gaat, kun je altijd handmatig plakken als automatisch plakken niet lukt.
+The app pastes text using `Ctrl+V` instead of typing it character by character. This is faster and works better with Dutch characters, punctuation, and longer text. Because the transcript is copied to the clipboard first, you can always paste it manually if automatic pasting fails.

@@ -1,5 +1,6 @@
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 import queue
@@ -11,9 +12,15 @@ import time
 import urllib.error
 import urllib.request
 import wave
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from tkinter import BooleanVar, Canvas, StringVar, Tk, Toplevel, messagebox, ttk
+
+APP_VERSION = "0.1.15"
+if __name__ == "__main__" and "--version" in sys.argv:
+    print(APP_VERSION)
+    raise SystemExit(0)
+
+from tkinter import END, BooleanVar, Canvas, Listbox, StringVar, Tk, Toplevel, messagebox, ttk
 
 import keyboard
 import keyring
@@ -25,6 +32,16 @@ import sounddevice as sd
 from groq import Groq
 from PIL import Image, ImageDraw
 
+from dictation_core import (
+    DictionaryValidationError,
+    apply_word_replacements,
+    compose_transcription_prompt,
+    normalize_custom_word,
+    normalize_custom_words,
+    normalize_replacement_part,
+    normalize_word_replacements,
+)
+
 try:
     import winsound
 except ImportError:  # pragma: no cover - Windows-only nicety
@@ -33,7 +50,6 @@ except ImportError:  # pragma: no cover - Windows-only nicety
 
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
-APP_VERSION = "0.1.14"
 GITHUB_REPO = "brvale97/groq-windows"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 KEYRING_SERVICE = APP_SLUG
@@ -43,17 +59,16 @@ _INSTANCE_LOCK_FILE = None
 MIN_TRANSCRIPTION_SECONDS = 1.0
 MIN_TRANSCRIPTION_BYTES = 32_000
 POST_STOP_RECORDING_SECONDS = 0.15
-
-ANDROID_MIC_PATH = (
-    "M12,14c1.66,0 3,-1.34 3,-3L15,5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6c0,1.66 1.34,3 3,3z"
-    "M17.3,11c0,3 -2.54,5.1 -5.3,5.1S6.7,14 6.7,11L5,11c0,3.41 2.72,6.23 6,6.72L11,21h2v-3.28"
-    "c3.28,-0.48 6,-3.3 6,-6.72L17.3,11z"
-)
+_SOUNDS_READY = False
+_SOUNDS_LOCK = threading.Lock()
 BUBBLE_COLORS = {
     "idle": "#E81123",
     "recording": "#ff2e3d",
     "processing": "#E81123",
 }
+SPLASH_MIN_VISIBLE_MS = 900
+SPLASH_READY_VISIBLE_MS = 350
+SPLASH_TRAY_TIMEOUT_MS = 10_000
 
 
 def app_data_dir() -> Path:
@@ -61,6 +76,12 @@ def app_data_dir() -> Path:
     if root:
         return Path(root) / APP_SLUG
     return Path.home() / f".{APP_SLUG}"
+
+
+def centered_window_geometry(width: int, height: int, screen_width: int, screen_height: int) -> str:
+    x = max(0, (screen_width - width) // 2)
+    y = max(0, (screen_height - height) // 2)
+    return f"{width}x{height}+{x}+{y}"
 
 
 APP_DIR = app_data_dir()
@@ -71,11 +92,20 @@ SOUNDS_DIR = APP_DIR / "sounds"
 
 def setup_logging() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        filename=LOG_PATH,
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+    root_logger = logging.getLogger()
+    if any(getattr(handler, "_groq_dictation_handler", False) for handler in root_logger.handlers):
+        return
+
+    handler = RotatingFileHandler(
+        LOG_PATH,
+        maxBytes=2 * 1024 * 1024,
+        backupCount=2,
+        encoding="utf-8",
     )
+    handler._groq_dictation_handler = True  # type: ignore[attr-defined]
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(handler)
 
 
 def acquire_single_instance_lock() -> bool:
@@ -130,12 +160,15 @@ class Config:
     model: str = "whisper-large-v3-turbo"
     language: str = "nl"
     prompt: str = ""
+    custom_words: tuple[str, ...] = ()
+    word_replacements: tuple[tuple[str, str], ...] = ()
     shortcut: str = "insert"
     input_device: str = ""
     sample_rate: int = 16_000
     channels: int = 1
     paste_after_transcription: bool = True
     autostart: bool = True
+    keyring_read_succeeded: bool = field(default=True, repr=False, compare=False)
 
 
 def load_dotenv_values(path: Path) -> dict[str, str]:
@@ -152,12 +185,12 @@ def load_dotenv_values(path: Path) -> dict[str, str]:
     return values
 
 
-def read_api_key_from_keyring() -> str:
+def try_read_api_key_from_keyring() -> tuple[bool, str]:
     try:
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or ""
+        return True, keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or ""
     except Exception as exc:
         logging.warning("Could not read API key from keyring: %s", exc)
-        return ""
+        return False, ""
 
 
 def write_api_key_to_keyring(api_key: str) -> bool:
@@ -175,34 +208,58 @@ def write_api_key_to_keyring(api_key: str) -> bool:
         return False
 
 
+def positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def load_config() -> Config:
     data: dict = {}
     if SETTINGS_PATH.exists():
         try:
-            data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+            loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+            else:
+                logging.warning("Ignoring settings file because its root is not an object.")
+        except (OSError, json.JSONDecodeError) as exc:
             logging.warning("Ignoring invalid settings file: %s", exc)
 
     env = load_dotenv_values(Path(".env"))
+    raw_custom_words = data.get("custom_words", ())
+    if not isinstance(raw_custom_words, (list, tuple)):
+        raw_custom_words = ()
+    raw_word_replacements = data.get("word_replacements", ())
+    if not isinstance(raw_word_replacements, (list, tuple)):
+        raw_word_replacements = ()
+    keyring_read_succeeded, keyring_api_key = try_read_api_key_from_keyring()
     config = Config(
         api_key="",
-        model=data.get("model") or env.get("GROQ_MODEL") or "whisper-large-v3-turbo",
-        language=data.get("language") if data.get("language") is not None else env.get("GROQ_LANGUAGE", "nl"),
-        prompt=data.get("prompt") if data.get("prompt") is not None else env.get("GROQ_PROMPT", ""),
-        shortcut=data.get("shortcut") or env.get("DICTATION_SHORTCUT") or "insert",
-        input_device=data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", ""),
-        sample_rate=int(data.get("sample_rate") or env.get("DICTATION_SAMPLE_RATE") or 16000),
-        channels=int(data.get("channels") or env.get("DICTATION_CHANNELS") or 1),
+        model=str(data.get("model") or env.get("GROQ_MODEL") or "whisper-large-v3-turbo"),
+        language=str(data.get("language") if data.get("language") is not None else env.get("GROQ_LANGUAGE", "nl")),
+        prompt=str(data.get("prompt") if data.get("prompt") is not None else env.get("GROQ_PROMPT", "")),
+        custom_words=normalize_custom_words(raw_custom_words, strict=False),
+        word_replacements=normalize_word_replacements(raw_word_replacements, strict=False),
+        shortcut=str(data.get("shortcut") or env.get("DICTATION_SHORTCUT") or "insert"),
+        input_device=str(
+            data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", "")
+        ),
+        sample_rate=positive_int(data.get("sample_rate") or env.get("DICTATION_SAMPLE_RATE"), 16_000),
+        channels=positive_int(data.get("channels") or env.get("DICTATION_CHANNELS"), 1),
         paste_after_transcription=bool(
             data.get("paste_after_transcription")
             if "paste_after_transcription" in data
             else env.get("PASTE_AFTER_TRANSCRIPTION", "true").lower() in {"1", "true", "yes", "on"}
         ),
         autostart=bool(data.get("autostart", True)),
+        keyring_read_succeeded=keyring_read_succeeded,
     )
 
     config.api_key = (
-        read_api_key_from_keyring()
+        keyring_api_key
         or data.get("api_key", "")
         or env.get("GROQ_API_KEY", "")
         or os.getenv("GROQ_API_KEY", "")
@@ -210,13 +267,56 @@ def load_config() -> Config:
     return config
 
 
-def save_config(config: Config) -> None:
+def save_config(config: Config, *, allow_keyring_mutation: bool | None = None) -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
+    if allow_keyring_mutation is None:
+        allow_keyring_mutation = config.keyring_read_succeeded
     data = asdict(config)
     api_key = data.pop("api_key", "")
-    if not write_api_key_to_keyring(api_key):
+    data.pop("keyring_read_succeeded", None)
+    if allow_keyring_mutation:
+        keyring_available, stored_api_key = try_read_api_key_from_keyring()
+    else:
+        keyring_available, stored_api_key = False, ""
+    should_write_keyring = (
+        allow_keyring_mutation
+        and bool(api_key)
+        and (not keyring_available or stored_api_key != api_key)
+    )
+    should_delete_keyring = (
+        allow_keyring_mutation
+        and not api_key
+        and (not keyring_available or bool(stored_api_key))
+    )
+    if (should_write_keyring or should_delete_keyring) and not write_api_key_to_keyring(api_key):
+        if api_key:
+            data["api_key"] = api_key
+    elif not allow_keyring_mutation and api_key:
+        # Preserve a legacy/settings fallback until a later startup can verify
+        # Credential Manager. It may be the only recoverable copy of the key.
         data["api_key"] = api_key
-    SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    serialized = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if SETTINGS_PATH.exists() and SETTINGS_PATH.read_text(encoding="utf-8") == serialized:
+        return
+
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=APP_DIR,
+            prefix="settings-",
+            suffix=".tmp",
+            delete=False,
+        ) as temp:
+            temp.write(serialized)
+            temp.flush()
+            os.fsync(temp.fileno())
+            temp_path = Path(temp.name)
+        os.replace(temp_path, SETTINGS_PATH)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def startup_cmd_path() -> Path:
@@ -244,7 +344,9 @@ def set_autostart(enabled: bool) -> None:
     path = startup_cmd_path()
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"@echo off\n{current_launch_command()}\n", encoding="utf-8")
+        content = f"@echo off\r\n{current_launch_command()}\r\n".encode("utf-8")
+        if not path.exists() or path.read_bytes() != content:
+            path.write_bytes(content)
     else:
         path.unlink(missing_ok=True)
 
@@ -314,12 +416,33 @@ def download_update(update: UpdateInfo) -> Path:
     update_dir = APP_DIR / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     destination = update_dir / f"{APP_SLUG}-{update.tag}.exe"
+    partial = destination.with_suffix(".exe.part")
     request = urllib.request.Request(
         update.download_url,
         headers={"User-Agent": APP_SLUG},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        destination.write_bytes(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
+            expected_length = response.headers.get("Content-Length")
+            downloaded = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+
+        if expected_length is not None and downloaded != int(expected_length):
+            raise RuntimeError(f"Onvolledige update-download: {downloaded} van {expected_length} bytes ontvangen.")
+        with partial.open("rb") as downloaded_file:
+            header = downloaded_file.read(2)
+        if downloaded < 1024 or header != b"MZ":
+            raise RuntimeError("Het gedownloade updatebestand is geen geldige Windows-app.")
+        os.replace(partial, destination)
+    finally:
+        partial.unlink(missing_ok=True)
     return destination
 
 
@@ -342,14 +465,19 @@ def launch_update_script(downloaded_exe: Path) -> None:
                 f"$Source = '{str(downloaded_exe).replace("'", "''")}'",
                 f"$Target = '{str(target).replace("'", "''")}'",
                 f"$Log = '{str(log_path).replace("'", "''")}'",
+                "$Backup = \"$Target.bak\"",
+                "$Staged = \"$Target.new\"",
                 f"$PidToWait = {current_pid}",
                 "function Log($Message) { Add-Content -LiteralPath $Log -Value \"$(Get-Date -Format o) $Message\" }",
                 "try {",
                 "  Log \"Waiting for process $PidToWait to exit\"",
                 "  try { Wait-Process -Id $PidToWait -Timeout 30 -ErrorAction SilentlyContinue } catch {}",
                 "  Start-Sleep -Milliseconds 700",
-                "  Log \"Copying $Source to $Target\"",
-                "  Copy-Item -LiteralPath $Source -Destination $Target -Force",
+                "  Log \"Staging $Source for $Target\"",
+                "  Copy-Item -LiteralPath $Source -Destination $Staged -Force",
+                "  if (Test-Path -LiteralPath $Backup) { Remove-Item -LiteralPath $Backup -Force }",
+                "  if (Test-Path -LiteralPath $Target) { Move-Item -LiteralPath $Target -Destination $Backup -Force }",
+                "  Move-Item -LiteralPath $Staged -Destination $Target -Force",
                 "  Log \"Starting $Target\"",
                 "  $Env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
                 "  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)",
@@ -357,6 +485,12 @@ def launch_update_script(downloaded_exe: Path) -> None:
                 "  Log \"Update complete\"",
                 "} catch {",
                 "  Log \"Update failed: $($_.Exception.Message)\"",
+                "  Remove-Item -LiteralPath $Staged -Force -ErrorAction SilentlyContinue",
+                "  if (Test-Path -LiteralPath $Backup) {",
+                "    Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue",
+                "    Move-Item -LiteralPath $Backup -Destination $Target -Force",
+                "    Log \"Previous version restored\"",
+                "  }",
                 "}",
                 "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
                 "",
@@ -390,187 +524,14 @@ def create_icon_image() -> Image.Image:
     return image
 
 
-def hex_to_rgba(value: str, alpha: int = 255) -> tuple[int, int, int, int]:
-    value = value.lstrip("#")
-    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16), alpha)
-
-
-def tokenize_svg_path(path_data: str) -> list[str]:
-    tokens: list[str] = []
-    i = 0
-    while i < len(path_data):
-        char = path_data[i]
-        if char.isalpha():
-            tokens.append(char)
-            i += 1
-            continue
-        if char in " ,\n\r\t":
-            i += 1
-            continue
-
-        start = i
-        i += 1
-        while i < len(path_data):
-            current = path_data[i]
-            previous = path_data[i - 1]
-            if current.isalpha() or current in " ,\n\r\t":
-                break
-            if current in "+-" and previous not in "eE":
-                break
-            i += 1
-        tokens.append(path_data[start:i])
-    return tokens
-
-
-def cubic_point(
-    p0: tuple[float, float],
-    p1: tuple[float, float],
-    p2: tuple[float, float],
-    p3: tuple[float, float],
-    t: float,
-) -> tuple[float, float]:
-    mt = 1 - t
-    return (
-        mt**3 * p0[0] + 3 * mt**2 * t * p1[0] + 3 * mt * t**2 * p2[0] + t**3 * p3[0],
-        mt**3 * p0[1] + 3 * mt**2 * t * p1[1] + 3 * mt * t**2 * p2[1] + t**3 * p3[1],
-    )
-
-
-def render_svg_path_mask(path_data: str, size: int, viewport: float = 24.0) -> Image.Image:
-    tokens = tokenize_svg_path(path_data)
-    paths: list[list[tuple[float, float]]] = []
-    path: list[tuple[float, float]] = []
-    current = (0.0, 0.0)
-    start = (0.0, 0.0)
-    last_control: tuple[float, float] | None = None
-    command = ""
-    index = 0
-
-    def is_command(token: str) -> bool:
-        return len(token) == 1 and token.isalpha()
-
-    def read_float() -> float:
-        nonlocal index
-        value = float(tokens[index])
-        index += 1
-        return value
-
-    def add_point(point: tuple[float, float]) -> None:
-        nonlocal current
-        path.append(point)
-        current = point
-
-    while index < len(tokens):
-        if is_command(tokens[index]):
-            command = tokens[index]
-            index += 1
-
-        lower = command.lower()
-        relative = command.islower()
-
-        if lower == "m":
-            first = True
-            while index < len(tokens) and not is_command(tokens[index]):
-                x, y = read_float(), read_float()
-                point = (current[0] + x, current[1] + y) if relative else (x, y)
-                if first:
-                    if path:
-                        paths.append(path)
-                    path = [point]
-                    current = point
-                    start = point
-                    first = False
-                else:
-                    add_point(point)
-                last_control = None
-            command = "l" if relative else "L"
-        elif lower == "l":
-            while index < len(tokens) and not is_command(tokens[index]):
-                x, y = read_float(), read_float()
-                add_point((current[0] + x, current[1] + y) if relative else (x, y))
-            last_control = None
-        elif lower == "h":
-            while index < len(tokens) and not is_command(tokens[index]):
-                x = read_float()
-                add_point((current[0] + x, current[1]) if relative else (x, current[1]))
-            last_control = None
-        elif lower == "v":
-            while index < len(tokens) and not is_command(tokens[index]):
-                y = read_float()
-                add_point((current[0], current[1] + y) if relative else (current[0], y))
-            last_control = None
-        elif lower == "c":
-            while index < len(tokens) and not is_command(tokens[index]):
-                x1, y1, x2, y2, x3, y3 = (read_float(), read_float(), read_float(), read_float(), read_float(), read_float())
-                p1 = (current[0] + x1, current[1] + y1) if relative else (x1, y1)
-                p2 = (current[0] + x2, current[1] + y2) if relative else (x2, y2)
-                p3 = (current[0] + x3, current[1] + y3) if relative else (x3, y3)
-                p0 = current
-                for step in range(1, 25):
-                    path.append(cubic_point(p0, p1, p2, p3, step / 24))
-                current = p3
-                last_control = p2
-        elif lower == "s":
-            while index < len(tokens) and not is_command(tokens[index]):
-                x2, y2, x3, y3 = read_float(), read_float(), read_float(), read_float()
-                if last_control is None:
-                    p1 = current
-                else:
-                    p1 = (2 * current[0] - last_control[0], 2 * current[1] - last_control[1])
-                p2 = (current[0] + x2, current[1] + y2) if relative else (x2, y2)
-                p3 = (current[0] + x3, current[1] + y3) if relative else (x3, y3)
-                p0 = current
-                for step in range(1, 25):
-                    path.append(cubic_point(p0, p1, p2, p3, step / 24))
-                current = p3
-                last_control = p2
-        elif lower == "z":
-            if path:
-                path.append(start)
-                paths.append(path)
-                path = []
-            current = start
-            last_control = None
-        else:
-            raise ValueError(f"Unsupported SVG path command: {command}")
-
-    if path:
-        paths.append(path)
-
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    scale = size / viewport
-    for subpath in paths:
-        points = [(round(x * scale), round(y * scale)) for x, y in subpath]
-        draw.polygon(points, fill=255)
-    return mask
-
-
-def create_bubble_image(state: str, size: int) -> Image.Image:
-    render_scale = 4
-    work_size = size * render_scale
-
-    def p(value: float) -> int:
-        return round((value / 60) * work_size)
-
-    image = Image.new("RGBA", (work_size, work_size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    color = hex_to_rgba(BUBBLE_COLORS.get(state, BUBBLE_COLORS["idle"]))
-
-    draw.ellipse((p(6), p(8), p(56), p(58)), fill=(0, 0, 0, 58))
-    draw.ellipse((p(4), p(2), p(56), p(54)), fill=color)
-    draw.ellipse((p(12), p(7), p(32), p(18)), fill=(255, 255, 255, 42))
-
-    icon_size = p(30)
-    icon = Image.new("RGBA", (icon_size, icon_size), (255, 255, 255, 0))
-    icon.putalpha(render_svg_path_mask(ANDROID_MIC_PATH, icon_size))
-    image.alpha_composite(icon, (p(15), p(13)))
-
-    if state == "recording":
-        draw.ellipse((p(43), p(10), p(52), p(19)), fill=(255, 255, 255, 235))
-
-    resample = getattr(Image, "Resampling", Image).LANCZOS
-    return image.resize((size, size), resample)
+def cleanup_confirmed_update_backup() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    backup = Path(f"{current_exe_path()}.bak")
+    try:
+        backup.unlink(missing_ok=True)
+    except OSError as exc:
+        logging.warning("Could not remove confirmed update backup %s: %s", backup, exc)
 
 
 def make_tone(path: Path, notes: list[float]) -> None:
@@ -606,20 +567,29 @@ def make_tone(path: Path, notes: list[float]) -> None:
 
 
 def ensure_sounds() -> None:
-    SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
-    marker = SOUNDS_DIR / ".groqandroid-cues-v1"
-    sounds = {
-        "start.wav": [523.25, 659.25],
-        "processing.wav": [587.33, 440.0],
-        "success.wav": [587.33, 440.0],
-        "error.wav": [246.94, 196.00],
-    }
+    global _SOUNDS_READY
+    if _SOUNDS_READY:
+        return
 
-    for filename, notes in sounds.items():
-        path = SOUNDS_DIR / filename
-        if not path.exists() or not marker.exists():
-            make_tone(path, notes)
-    marker.write_text("Generated from GroqAndroid cue parameters.\n", encoding="utf-8")
+    with _SOUNDS_LOCK:
+        if _SOUNDS_READY:
+            return
+        SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+        marker = SOUNDS_DIR / ".groqandroid-cues-v1"
+        sounds = {
+            "start.wav": [523.25, 659.25],
+            "success.wav": [587.33, 440.0],
+            "error.wav": [246.94, 196.00],
+        }
+        generated = False
+        for filename, notes in sounds.items():
+            path = SOUNDS_DIR / filename
+            if not path.exists() or not marker.exists():
+                make_tone(path, notes)
+                generated = True
+        if generated or not marker.exists():
+            marker.write_text("Generated from GroqAndroid cue parameters.\n", encoding="utf-8")
+        _SOUNDS_READY = True
 
 
 def play_sound(name: str) -> None:
@@ -649,31 +619,12 @@ def resolve_input_device(input_device: str) -> int | None:
     raise RuntimeError(f"Geen input device gevonden voor {input_device!r}.")
 
 
-def input_device_name(device_id: int | None) -> str:
-    if device_id is None:
-        default_input = sd.default.device[0]
-        device_id = default_input if default_input is not None and default_input >= 0 else None
-
-    if device_id is None:
-        return "Windows default input"
-
-    device = sd.query_devices(device_id)
-    return f"{device_id}: {device['name']}"
-
-
 def input_devices() -> list[tuple[str, str]]:
     devices = [("", "Windows default input")]
     for index, device in enumerate(sd.query_devices()):
         if device["max_input_channels"] > 0:
             devices.append((str(index), f"{index}: {device['name']}"))
     return devices
-
-
-def input_device_label(device_id: str) -> str:
-    for candidate_id, label in input_devices():
-        if candidate_id == device_id:
-            return label
-    return "Windows default input"
 
 
 def normalize_tk_key(keysym: str) -> str:
@@ -1055,6 +1006,78 @@ class StatusBubble:
             pass
 
 
+@dataclass(frozen=True)
+class RecordingSession:
+    input_device: int | None
+    sample_rate: int
+    channels: int
+    model: str
+    language: str
+    prompt: str
+    word_replacements: tuple[tuple[str, str], ...]
+    paste_after_transcription: bool
+    client: Groq
+
+
+class StartupSplash:
+    width = 380
+    height = 170
+
+    def __init__(self, root: Tk) -> None:
+        self.root = root
+        self.destroyed = False
+        self.started_at = time.monotonic()
+        self.window = Toplevel(root)
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        self.window.geometry(
+            centered_window_geometry(
+                self.width,
+                self.height,
+                self.window.winfo_screenwidth(),
+                self.window.winfo_screenheight(),
+            )
+        )
+
+        frame = ttk.Frame(self.window, padding=24, relief="solid", borderwidth=1)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Groq Windows Dictation", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        self.status = StringVar(value="Wordt geladen in het systeemvak...")
+        ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 10)).pack(anchor="w", pady=(12, 8))
+        self.progress = ttk.Progressbar(frame, mode="indeterminate")
+        self.progress.pack(fill="x")
+        self.progress.start(12)
+        ttk.Label(
+            frame,
+            text="Daarna blijft de app beschikbaar via het icoon rechtsonder.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(9, 0))
+
+        # Paint once before synchronous configuration and sound initialization.
+        self.root.update_idletasks()
+        self.root.update()
+
+    def minimum_time_has_elapsed(self) -> bool:
+        elapsed_ms = (time.monotonic() - self.started_at) * 1000
+        return elapsed_ms >= SPLASH_MIN_VISIBLE_MS
+
+    def show_ready(self) -> None:
+        if self.destroyed:
+            return
+        self.progress.stop()
+        self.status.set("Klaar — actief in het systeemvak")
+
+    def destroy(self) -> None:
+        if self.destroyed:
+            return
+        self.destroyed = True
+        self.progress.stop()
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+
+
 class DictationEngine:
     def __init__(self, config: Config, status_callback=None, state_callback=None) -> None:
         self.config = config
@@ -1062,11 +1085,13 @@ class DictationEngine:
         self.state_callback = state_callback or (lambda state: None)
         self.input_device = resolve_input_device(config.input_device)
         self.client = Groq(api_key=config.api_key) if config.api_key else None
-        self.audio_queue: queue.Queue = queue.Queue()
-        self.frames: list = []
+        self.audio_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self.audio_warning: str | None = None
         self.stream: sd.InputStream | None = None
+        self.active_session: RecordingSession | None = None
         self.state = "idle"
         self.lock = threading.Lock()
+        self.stream_transition_lock = threading.Lock()
 
         pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0
@@ -1080,11 +1105,6 @@ class DictationEngine:
     def notify(self, message: str) -> None:
         logging.info(message)
         self.status_callback(message)
-
-    def set_state(self, state: str) -> None:
-        with self.lock:
-            self.state = state
-        self.emit_state(state)
 
     def emit_state(self, state: str) -> None:
         self.state_callback(state)
@@ -1108,66 +1128,122 @@ class DictationEngine:
             play_sound("error.wav")
 
     def start_recording(self) -> None:
-        if not self.config.api_key:
-            self.notify("Open Instellingen en vul eerst je Groq API key in.")
-            play_sound("error.wav")
-            return
+        with self.stream_transition_lock:
+            self._start_recording()
 
+    def _start_recording(self) -> None:
         with self.lock:
             if self.state != "idle":
                 return
-            self.state = "recording"
-            self.frames = []
-            self.audio_queue = queue.Queue()
+            config = self.config
+            if not config.api_key or self.client is None:
+                session = None
+            else:
+                session = RecordingSession(
+                    input_device=self.input_device,
+                    sample_rate=config.sample_rate,
+                    channels=config.channels,
+                    model=config.model,
+                    language=config.language,
+                    prompt=compose_transcription_prompt(config.prompt, config.custom_words),
+                    word_replacements=config.word_replacements,
+                    paste_after_transcription=config.paste_after_transcription,
+                    client=self.client,
+                )
 
+            if session is None:
+                self.notify("Open Instellingen en vul eerst je Groq API key in.")
+                play_sound("error.wav")
+                return
+            self.state = "recording"
+            self.active_session = session
+            self.audio_queue = queue.SimpleQueue()
+            self.audio_warning = None
+
+        stream: sd.InputStream | None = None
         try:
-            self.stream = sd.InputStream(
-                device=self.input_device,
-                samplerate=self.config.sample_rate,
-                channels=self.config.channels,
+            stream = sd.InputStream(
+                device=session.input_device,
+                samplerate=session.sample_rate,
+                channels=session.channels,
                 dtype="int16",
                 callback=self.audio_callback,
             )
-            self.stream.start()
+            stream.start()
+            self.stream = stream
         except Exception:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    logging.exception("Could not close failed input stream")
             with self.lock:
                 self.state = "idle"
+                self.active_session = None
+                self.stream = None
             self.emit_state("idle")
             raise
 
         self.emit_state("recording")
         play_sound("start.wav")
-        self.notify("Opname gestart. Druk nog eens op Insert om te stoppen.")
+        self.notify("Opname gestart. Gebruik je shortcut opnieuw om te stoppen.")
 
     def stop_recording(self) -> None:
+        with self.stream_transition_lock:
+            self._stop_recording()
+
+    def _stop_recording(self) -> None:
         with self.lock:
             if self.state != "recording":
                 return
             self.state = "processing"
+            stream = self.stream
+            self.stream = None
+            session = self.active_session
+            self.active_session = None
         self.emit_state("processing")
 
-        if self.stream is not None:
+        if stream is not None:
             time.sleep(POST_STOP_RECORDING_SECONDS)
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+            try:
+                stream.stop()
+            except Exception as exc:
+                logging.warning("Could not stop input stream cleanly: %s", exc)
+            finally:
+                try:
+                    stream.close()
+                except Exception as exc:
+                    logging.warning("Could not close input stream cleanly: %s", exc)
 
+        captured_frames: list[np.ndarray] = []
         while True:
             try:
-                self.frames.append(self.audio_queue.get_nowait())
+                captured_frames.append(self.audio_queue.get_nowait())
             except queue.Empty:
                 break
 
+        if self.audio_warning:
+            self.notify(f"Audio waarschuwing: {self.audio_warning}")
         self.notify("Opname gestopt. Transcriberen...")
-        threading.Thread(target=self.transcribe_and_output, daemon=True).start()
+        if session is None:
+            raise RuntimeError("Opnamesessie ontbreekt.")
+        threading.Thread(
+            target=self.transcribe_and_output,
+            args=(session, captured_frames),
+            daemon=True,
+        ).start()
 
     def audio_callback(self, indata, frames, time_info, status) -> None:
         if status:
-            self.notify(f"Audio waarschuwing: {status}")
+            self.audio_warning = str(status)
         self.audio_queue.put(indata.copy())
 
-    def write_wav(self) -> Path:
-        if not self.frames:
+    def write_wav_and_stats(
+        self,
+        session: RecordingSession,
+        frames: list[np.ndarray],
+    ) -> tuple[Path, float, float, float]:
+        if not frames:
             raise RuntimeError("Geen audio opgenomen.")
 
         temp = tempfile.NamedTemporaryFile(
@@ -1178,33 +1254,39 @@ class DictationEngine:
         temp_path = Path(temp.name)
         temp.close()
 
-        with wave.open(str(temp_path), "wb") as wav:
-            wav.setnchannels(self.config.channels)
-            wav.setsampwidth(2)
-            wav.setframerate(self.config.sample_rate)
-            for frame in self.frames:
-                wav.writeframes(frame.tobytes())
+        frame_count = 0
+        sample_count = 0
+        peak_value = 0.0
+        sum_of_squares = 0.0
+        try:
+            with wave.open(str(temp_path), "wb") as wav:
+                wav.setnchannels(session.channels)
+                wav.setsampwidth(2)
+                wav.setframerate(session.sample_rate)
+                for frame in frames:
+                    wav.writeframesraw(frame.tobytes())
+                    values = np.asarray(frame, dtype=np.float64)
+                    frame_count += len(frame)
+                    sample_count += values.size
+                    if values.size:
+                        peak_value = max(peak_value, float(np.max(np.abs(values))))
+                        sum_of_squares += float(np.sum(np.square(values)))
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
 
-        return temp_path
+        duration = frame_count / session.sample_rate
+        peak = peak_value / 32768.0 if sample_count else 0.0
+        rms = math.sqrt(sum_of_squares / sample_count) / 32768.0 if sample_count else 0.0
+        return temp_path, duration, peak, rms
 
-    def audio_stats(self) -> tuple[float, float, float]:
-        if not self.frames:
-            return 0.0, 0.0, 0.0
-
-        audio = np.concatenate(self.frames, axis=0).astype(np.float32)
-        samples = audio.reshape(-1)
-        duration = len(audio) / self.config.sample_rate
-        peak = float(np.max(np.abs(samples)) / 32768.0) if samples.size else 0.0
-        rms = float(np.sqrt(np.mean((samples / 32768.0) ** 2))) if samples.size else 0.0
-        return duration, peak, rms
-
-    def transcribe_and_output(self) -> None:
+    def transcribe_and_output(self, session: RecordingSession, frames: list[np.ndarray]) -> None:
         wav_path: Path | None = None
         started_at = time.perf_counter()
         show_idle_bubble = True
         try:
-            wav_path = self.write_wav()
-            duration, peak, rms = self.audio_stats()
+            wav_path, duration, peak, rms = self.write_wav_and_stats(session, frames)
+            frames.clear()
             self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
             if duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES:
                 self.notify("Transcriptie te kort. Er is niets geplakt.")
@@ -1216,7 +1298,11 @@ class DictationEngine:
             if peak < 0.01:
                 self.notify("Waarschuwing: bijna geen inputvolume gemeten. Check microfoon/device.")
 
-            text = remove_final_sentence_period(self.transcribe(wav_path).strip())
+            text = apply_word_replacements(
+                self.transcribe(session, wav_path).strip(),
+                session.word_replacements,
+            )
+            text = remove_final_sentence_period(text)
             elapsed = time.perf_counter() - started_at
 
             if not text:
@@ -1233,7 +1319,7 @@ class DictationEngine:
             pyperclip.copy(text)
             self.notify(f"Transcriptie klaar in {elapsed:.1f}s. Tekst staat op je klembord.")
 
-            if self.config.paste_after_transcription:
+            if session.paste_after_transcription:
                 try:
                     pyautogui.hotkey("ctrl", "v")
                     self.notify("Geplakt in het actieve venster.")
@@ -1245,6 +1331,7 @@ class DictationEngine:
             self.notify(f"Fout: {exc}")
             play_sound("error.wav")
         finally:
+            frames.clear()
             if wav_path is not None:
                 try:
                     wav_path.unlink(missing_ok=True)
@@ -1254,59 +1341,98 @@ class DictationEngine:
                 self.state = "idle"
             if show_idle_bubble:
                 self.emit_state("idle")
-            self.notify("Klaar. Druk op Insert voor een nieuwe opname.")
+            self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")
 
-    def transcribe(self, wav_path: Path) -> str:
-        if self.client is None:
-            raise RuntimeError("Groq API key ontbreekt.")
-
+    def transcribe(self, session: RecordingSession, wav_path: Path) -> str:
         kwargs = {
             "file": wav_path.open("rb"),
-            "model": self.config.model,
+            "model": session.model,
             "response_format": "json",
             "temperature": 0.0,
         }
-        if self.config.language:
-            kwargs["language"] = self.config.language
-        if self.config.prompt:
-            kwargs["prompt"] = self.config.prompt
+        if session.language:
+            kwargs["language"] = session.language
+        if session.prompt:
+            kwargs["prompt"] = session.prompt
 
         with kwargs["file"] as audio_file:
             kwargs["file"] = audio_file
-            transcription = self.client.audio.transcriptions.create(**kwargs)
+            try:
+                transcription = session.client.audio.transcriptions.create(**kwargs)
+            except Exception as exc:
+                error_text = str(exc).lower()
+                if "prompt" in error_text and ("224" in error_text or "token" in error_text):
+                    raise RuntimeError(
+                        "Prompt en woordenboek zijn samen te lang voor Groq. "
+                        "Maak de Prompt korter of verwijder enkele woorden."
+                    ) from exc
+                raise
 
         return getattr(transcription, "text", "") or ""
+
+    def shutdown(self) -> None:
+        with self.stream_transition_lock:
+            self._shutdown()
+
+    def _shutdown(self) -> None:
+        with self.lock:
+            stream = self.stream
+            self.stream = None
+            self.active_session = None
+            self.state = "idle"
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:
+                try:
+                    stream.stop()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
 
 class TrayApp:
     def __init__(self) -> None:
         setup_logging()
-        ensure_sounds()
         self.root = Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
+        self.splash = StartupSplash(self.root)
+        self.tray_startup_complete = threading.Event()
+        self.tray_startup_error: Exception | None = None
+        self.fatal_startup_error: Exception | None = None
+        self.startup_finished = False
 
-        self.config = load_config()
-        self.bubble = StatusBubble(self.root, self.open_settings)
-        self.engine = DictationEngine(self.config, self.set_status, self.set_engine_state)
-        self.hotkey_handle = None
-        self.update_window = None
-        self.icon = pystray.Icon(
-            APP_SLUG,
-            create_icon_image(),
-            f"{APP_NAME} v{APP_VERSION}",
-            menu=pystray.Menu(
-                pystray.MenuItem("Instellingen", lambda: self.root.after(0, self.open_settings)),
-                pystray.MenuItem("Controleren op updates", lambda: self.root.after(0, self.check_for_updates_manual)),
-                pystray.MenuItem("Geluiden testen", lambda: self.root.after(0, self.test_sounds)),
-                pystray.MenuItem("Logbestand openen", lambda: self.root.after(0, self.open_log)),
-                pystray.MenuItem("App herstarten", lambda: self.root.after(0, self.restart)),
-                pystray.MenuItem("Afsluiten", lambda: self.root.after(0, self.quit)),
-            ),
-        )
+        try:
+            ensure_sounds()
+            self.config = load_config()
+            self.bubble = StatusBubble(self.root, self.open_settings)
+            self.engine = DictationEngine(self.config, self.set_status, self.set_engine_state)
+            self.hotkey_handle = None
+            self.update_window = None
+            self.icon = pystray.Icon(
+                APP_SLUG,
+                create_icon_image(),
+                f"{APP_NAME} v{APP_VERSION}",
+                menu=pystray.Menu(
+                    pystray.MenuItem("Instellingen", lambda: self.root.after(0, self.open_settings)),
+                    pystray.MenuItem("Controleren op updates", lambda: self.root.after(0, self.check_for_updates_manual)),
+                    pystray.MenuItem("Geluiden testen", lambda: self.root.after(0, self.test_sounds)),
+                    pystray.MenuItem("Logbestand openen", lambda: self.root.after(0, self.open_log)),
+                    pystray.MenuItem("App herstarten", lambda: self.root.after(0, self.restart)),
+                    pystray.MenuItem("Afsluiten", lambda: self.root.after(0, self.quit)),
+                ),
+            )
+        except Exception:
+            self.splash.destroy()
+            self.root.destroy()
+            raise
 
     def set_status(self, message: str) -> None:
-        logging.info(message)
         try:
             self.icon.title = f"{APP_NAME} - {message[:50]}"
         except Exception:
@@ -1332,15 +1458,74 @@ class TrayApp:
             self.hotkey_handle = None
 
     def run(self) -> None:
-        save_config(self.config)
-        set_autostart(self.config.autostart)
-        self.install_hotkey()
-        self.icon.run_detached()
+        # A startup save migrates a non-empty legacy/.env key to Credential
+        # Manager, but must never interpret a temporary keyring read failure as
+        # an explicit request to delete an existing secret.
+        try:
+            save_config(self.config)
+            set_autostart(self.config.autostart)
+            self.install_hotkey()
+            self.icon.run_detached(self._setup_tray)
+            self.root.after(25, self._poll_startup_ready)
+        except Exception:
+            self._cleanup_failed_startup()
+            raise
+        self.root.mainloop()
+        if self.fatal_startup_error is not None:
+            raise self.fatal_startup_error
+
+    def _setup_tray(self, icon: pystray.Icon) -> None:
+        try:
+            icon.visible = True
+        except Exception as exc:
+            self.tray_startup_error = exc
+        finally:
+            self.tray_startup_complete.set()
+
+    def _poll_startup_ready(self) -> None:
+        if self.startup_finished:
+            return
+        elapsed_ms = (time.monotonic() - self.splash.started_at) * 1000
+        if not self.tray_startup_complete.is_set() and elapsed_ms >= SPLASH_TRAY_TIMEOUT_MS:
+            self._fail_startup(RuntimeError("Het systeemvak kon niet op tijd worden gestart."))
+            return
+        if self.tray_startup_complete.is_set() and self.tray_startup_error is not None:
+            self._fail_startup(RuntimeError(f"Het systeemvak kon niet worden gestart: {self.tray_startup_error}"))
+            return
+        if self.tray_startup_complete.is_set() and self.splash.minimum_time_has_elapsed():
+            self.splash.show_ready()
+            self.root.after(SPLASH_READY_VISIBLE_MS, self._finish_startup)
+            return
+        self.root.after(25, self._poll_startup_ready)
+
+    def _fail_startup(self, error: Exception) -> None:
+        self.fatal_startup_error = error
+        self._cleanup_failed_startup()
+
+    def _cleanup_failed_startup(self) -> None:
+        self.startup_finished = True
+        self.splash.destroy()
+        self.remove_hotkey()
+        try:
+            self.icon.stop()
+        except Exception:
+            pass
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _finish_startup(self) -> None:
+        if self.startup_finished:
+            return
+        self.startup_finished = True
+        self.splash.destroy()
 
         if not self.config.api_key:
             self.root.after(250, self.open_settings)
         self.root.after(2500, self.check_for_updates_auto)
-        self.root.mainloop()
+        self.root.after(5000, cleanup_confirmed_update_backup)
 
     def check_for_updates_auto(self) -> None:
         if not getattr(sys, "frozen", False):
@@ -1450,17 +1635,35 @@ class TrayApp:
         window = Toplevel(self.root)
         self.settings_window = window
         window.title(f"{APP_NAME} instellingen")
-        window.geometry("560x430")
+        window.geometry("560x470")
         window.resizable(False, False)
 
         api_key = StringVar(value=self.config.api_key)
         model = StringVar(value=self.config.model)
         language = StringVar(value=self.config.language)
         prompt = StringVar(value=self.config.prompt)
+        custom_words = list(self.config.custom_words)
+        word_replacements = list(self.config.word_replacements)
+        dictionary_summary = StringVar()
         shortcut = StringVar(value=self.config.shortcut)
-        input_device = StringVar(value=input_device_label(self.config.input_device))
+        device_options = input_devices()
+        device_labels = {device_id: label for device_id, label in device_options}
+        input_device = StringVar(value=device_labels.get(self.config.input_device, "Windows default input"))
         paste = BooleanVar(value=self.config.paste_after_transcription)
         autostart_var = BooleanVar(value=self.config.autostart or autostart_enabled())
+
+        def update_dictionary_summary() -> None:
+            word_count = len(custom_words)
+            replacement_count = len(word_replacements)
+            words_label = f"{word_count} woord" if word_count == 1 else f"{word_count} woorden"
+            replacements_label = (
+                f"{replacement_count} vervanging"
+                if replacement_count == 1
+                else f"{replacement_count} vervangingen"
+            )
+            dictionary_summary.set(f"{words_label}, {replacements_label}")
+
+        update_dictionary_summary()
 
         frame = ttk.Frame(window, padding=18)
         frame.pack(fill="both", expand=True)
@@ -1483,35 +1686,230 @@ class TrayApp:
         ttk.Label(frame, text="Prompt").grid(row=3, column=0, sticky="nw", pady=6)
         ttk.Entry(frame, textvariable=prompt).grid(row=3, column=1, sticky="ew", pady=6)
 
-        ttk.Label(frame, text="Shortcut").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Label(frame, text="Woordenboek").grid(row=4, column=0, sticky="w", pady=6)
+        dictionary_frame = ttk.Frame(frame)
+        dictionary_frame.grid(row=4, column=1, sticky="ew", pady=6)
+        dictionary_frame.columnconfigure(0, weight=1)
+        ttk.Label(dictionary_frame, textvariable=dictionary_summary, foreground="#555").grid(
+            row=0, column=0, sticky="w"
+        )
+        dictionary_button = ttk.Button(dictionary_frame, text="Beheren...")
+        dictionary_button.grid(row=0, column=1)
+
+        ttk.Label(frame, text="Shortcut").grid(row=5, column=0, sticky="w", pady=6)
         shortcut_frame = ttk.Frame(frame)
-        shortcut_frame.grid(row=4, column=1, sticky="ew", pady=6)
+        shortcut_frame.grid(row=5, column=1, sticky="ew", pady=6)
         shortcut_frame.columnconfigure(0, weight=1)
         ttk.Entry(shortcut_frame, textvariable=shortcut).grid(row=0, column=0, sticky="ew")
         capture_button = ttk.Button(shortcut_frame, text="Wijzig")
         capture_button.grid(row=0, column=1, padx=(8, 0))
 
-        ttk.Label(frame, text="Microfoon").grid(row=5, column=0, sticky="w", pady=6)
+        ttk.Label(frame, text="Microfoon").grid(row=6, column=0, sticky="w", pady=6)
         ttk.Combobox(
             frame,
             textvariable=input_device,
-            values=[label for _, label in input_devices()],
+            values=[label for _, label in device_options],
             state="readonly",
-        ).grid(row=5, column=1, sticky="ew", pady=6)
+        ).grid(row=6, column=1, sticky="ew", pady=6)
 
         ttk.Checkbutton(frame, text="Transcriptie automatisch plakken", variable=paste).grid(
-            row=6, column=1, sticky="w", pady=6
+            row=7, column=1, sticky="w", pady=6
         )
         ttk.Checkbutton(frame, text="Start automatisch met Windows", variable=autostart_var).grid(
-            row=7, column=1, sticky="w", pady=6
+            row=8, column=1, sticky="w", pady=6
         )
 
         status = StringVar(value=f"Instellingen: {SETTINGS_PATH}")
-        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=8, column=0, columnspan=2, sticky="w", pady=12)
+        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=9, column=0, columnspan=2, sticky="w", pady=12)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=16)
+        buttons.grid(row=10, column=0, columnspan=2, sticky="e", pady=16)
         capture_bind_id: list[str | None] = [None]
+        dictionary_window: list[Toplevel | None] = [None]
+
+        def open_dictionary() -> None:
+            existing_dialog = dictionary_window[0]
+            if existing_dialog is not None and existing_dialog.winfo_exists():
+                existing_dialog.lift()
+                existing_dialog.focus_force()
+                return
+
+            dialog = Toplevel(window)
+            dictionary_window[0] = dialog
+            dialog.title("Persoonlijk woordenboek")
+            dialog.geometry("600x620")
+            dialog.resizable(False, False)
+            dialog.transient(window)
+
+            def close_dialog() -> None:
+                dictionary_window[0] = None
+                try:
+                    dialog.grab_release()
+                except Exception:
+                    pass
+                dialog.destroy()
+
+            dialog_frame = ttk.Frame(dialog, padding=16)
+            dialog_frame.pack(fill="both", expand=True)
+            dialog_frame.columnconfigure(0, weight=1)
+            dialog_frame.rowconfigure(2, weight=1)
+            dialog_frame.rowconfigure(4, weight=1)
+
+            ttk.Label(
+                dialog_frame,
+                text="Voeg namen, jargon of woorden toe die Groq helpen bij herkenning en spelling.",
+                wraplength=440,
+            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+            word_value = StringVar()
+            word_entry = ttk.Entry(dialog_frame, textvariable=word_value)
+            word_entry.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+
+            list_frame = ttk.Frame(dialog_frame)
+            list_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 10))
+            list_frame.columnconfigure(0, weight=1)
+            list_frame.rowconfigure(0, weight=1)
+            word_list = Listbox(list_frame, height=6, exportselection=False)
+            word_list.grid(row=0, column=0, sticky="nsew")
+            scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=word_list.yview)
+            scrollbar.grid(row=0, column=1, sticky="ns")
+            word_list.configure(yscrollcommand=scrollbar.set)
+
+            def refresh_words(select_index: int | None = None) -> None:
+                word_list.delete(0, END)
+                for item in custom_words:
+                    word_list.insert(END, item)
+                update_dictionary_summary()
+                if select_index is not None and custom_words:
+                    index = min(select_index, len(custom_words) - 1)
+                    word_list.selection_set(index)
+                    word_list.see(index)
+
+            def add_word() -> None:
+                try:
+                    word = normalize_custom_word(word_value.get())
+                    if any(existing.casefold() == word.casefold() for existing in custom_words):
+                        raise DictionaryValidationError(f"'{word}' staat al in het woordenboek.")
+                    candidate = normalize_custom_words([*custom_words, word])
+                    compose_transcription_prompt(prompt.get(), candidate)
+                except DictionaryValidationError as exc:
+                    messagebox.showerror(APP_NAME, str(exc), parent=dialog)
+                    return
+                custom_words.append(word)
+                word_value.set("")
+                refresh_words(len(custom_words) - 1)
+                word_entry.focus_set()
+
+            def remove_word() -> None:
+                selection = word_list.curselection()
+                if not selection:
+                    return
+                index = int(selection[0])
+                del custom_words[index]
+                refresh_words(index)
+
+            def create_replacements_section() -> None:
+                replacements_frame = ttk.LabelFrame(dialog_frame, text="Vervangingen", padding=12)
+                replacements_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(12, 10))
+                replacements_frame.columnconfigure(1, weight=1)
+                replacements_frame.rowconfigure(3, weight=1)
+
+                ttk.Label(
+                    replacements_frame,
+                    text=(
+                        "Vervang bekende transcriptiefouten altijd door de gewenste spelling, "
+                        "bijvoorbeeld Grok → Groq."
+                    ),
+                    wraplength=530,
+                ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+                source_value = StringVar()
+                target_value = StringVar()
+                ttk.Label(replacements_frame, text="Verkeerd").grid(row=1, column=0, sticky="w", padx=(0, 8))
+                source_entry = ttk.Entry(replacements_frame, textvariable=source_value)
+                source_entry.grid(row=1, column=1, sticky="ew", pady=3)
+                ttk.Label(replacements_frame, text="Correct").grid(row=2, column=0, sticky="w", padx=(0, 8))
+                target_entry = ttk.Entry(replacements_frame, textvariable=target_value)
+                target_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+                replacements_list_frame = ttk.Frame(replacements_frame)
+                replacements_list_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(12, 10))
+                replacements_list_frame.columnconfigure(0, weight=1)
+                replacements_list_frame.rowconfigure(0, weight=1)
+                replacements_list = Listbox(replacements_list_frame, height=6, exportselection=False)
+                replacements_list.grid(row=0, column=0, sticky="nsew")
+                replacements_scrollbar = ttk.Scrollbar(
+                    replacements_list_frame,
+                    orient="vertical",
+                    command=replacements_list.yview,
+                )
+                replacements_scrollbar.grid(row=0, column=1, sticky="ns")
+                replacements_list.configure(yscrollcommand=replacements_scrollbar.set)
+
+                def refresh_replacements(select_index: int | None = None) -> None:
+                    replacements_list.delete(0, END)
+                    for source, target in word_replacements:
+                        replacements_list.insert(END, f"{source} → {target}")
+                    update_dictionary_summary()
+                    if select_index is not None and word_replacements:
+                        index = min(select_index, len(word_replacements) - 1)
+                        replacements_list.selection_set(index)
+                        replacements_list.see(index)
+
+                def add_replacement() -> None:
+                    try:
+                        source = normalize_replacement_part(source_value.get(), "verkeerd herkende")
+                        target = normalize_replacement_part(target_value.get(), "correcte")
+                        candidate = normalize_word_replacements([*word_replacements, (source, target)])
+                        if len(candidate) == len(word_replacements):
+                            raise DictionaryValidationError(f"Voor '{source}' bestaat al een vervanging.")
+                    except DictionaryValidationError as exc:
+                        messagebox.showerror(APP_NAME, str(exc), parent=dialog)
+                        return
+                    word_replacements.append((source, target))
+                    source_value.set("")
+                    target_value.set("")
+                    refresh_replacements(len(word_replacements) - 1)
+                    source_entry.focus_set()
+
+                def remove_replacement() -> None:
+                    selection = replacements_list.curselection()
+                    if not selection:
+                        return
+                    index = int(selection[0])
+                    del word_replacements[index]
+                    refresh_replacements(index)
+
+                ttk.Button(replacements_frame, text="Toevoegen", command=add_replacement).grid(
+                    row=1,
+                    column=2,
+                    rowspan=2,
+                    padx=(8, 0),
+                )
+                replacement_buttons = ttk.Frame(replacements_frame)
+                replacement_buttons.grid(row=4, column=0, columnspan=3, sticky="e")
+                ttk.Button(replacement_buttons, text="Verwijderen", command=remove_replacement).pack(
+                    side="left",
+                    padx=6,
+                )
+                target_entry.bind("<Return>", lambda _event: (add_replacement(), "break")[1])
+                refresh_replacements()
+
+            ttk.Button(dialog_frame, text="Toevoegen", command=add_word).grid(row=1, column=1)
+            dialog_buttons = ttk.Frame(dialog_frame)
+            dialog_buttons.grid(row=3, column=0, columnspan=2, sticky="e")
+            ttk.Button(dialog_buttons, text="Verwijderen", command=remove_word).pack(side="left", padx=6)
+            create_replacements_section()
+            close_buttons = ttk.Frame(dialog_frame)
+            close_buttons.grid(row=5, column=0, columnspan=2, sticky="e")
+            ttk.Button(close_buttons, text="Sluiten", command=close_dialog).pack(side="left", padx=6)
+            word_entry.bind("<Return>", lambda _event: (add_word(), "break")[1])
+            refresh_words()
+            dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+            dialog.grab_set()
+            word_entry.focus_set()
+
+        dictionary_button.configure(command=open_dictionary)
 
         def stop_capture(restore_hotkey: bool) -> None:
             if capture_bind_id[0] is not None:
@@ -1554,7 +1952,7 @@ class TrayApp:
             stop_capture(restore_hotkey=False)
             selected_device = input_device.get()
             selected_device_id = ""
-            for device_id, label in input_devices():
+            for device_id, label in device_options:
                 if label == selected_device:
                     selected_device_id = device_id
                     break
@@ -1564,25 +1962,43 @@ class TrayApp:
             normalized_shortcut = normalize_hotkey_text(shortcut.get()) or "insert"
             try:
                 validate_hotkey(normalized_shortcut)
+                normalized_words = normalize_custom_words(custom_words)
+                normalized_replacements = normalize_word_replacements(word_replacements)
+                compose_transcription_prompt(prompt.get(), normalized_words)
+            except DictionaryValidationError as exc:
+                messagebox.showerror(APP_NAME, str(exc))
+                return
             except Exception as exc:
                 messagebox.showerror(APP_NAME, f"Shortcut wordt niet herkend:\n{normalized_shortcut}\n\n{exc}")
                 return
 
+            entered_api_key = api_key.get().strip()
             new_config = Config(
-                api_key=api_key.get().strip(),
+                api_key=entered_api_key,
                 model=model.get().strip() or "whisper-large-v3-turbo",
                 language=language.get().strip(),
                 prompt=prompt.get().strip(),
+                custom_words=normalized_words,
+                word_replacements=normalized_replacements,
                 shortcut=normalized_shortcut,
                 input_device=selected_device_id,
+                sample_rate=self.config.sample_rate,
+                channels=self.config.channels,
                 paste_after_transcription=paste.get(),
                 autostart=autostart_var.get(),
+                # If Credential Manager could not be read at startup, an
+                # unchanged fallback value must not overwrite a newer secret.
+                # Deliberately editing the field still authorizes the change.
+                keyring_read_succeeded=(
+                    self.config.keyring_read_succeeded
+                    or entered_api_key != self.config.api_key
+                ),
             )
             try:
+                save_config(new_config)
+                set_autostart(new_config.autostart)
+                self.engine.update_config(new_config)
                 self.config = new_config
-                save_config(self.config)
-                set_autostart(self.config.autostart)
-                self.engine.update_config(self.config)
                 self.install_hotkey()
             except Exception as exc:
                 messagebox.showerror(APP_NAME, f"Instellingen konden niet worden opgeslagen:\n{exc}")
@@ -1630,7 +2046,10 @@ class TrayApp:
         self.quit()
 
     def quit(self) -> None:
+        self.startup_finished = True
+        self.splash.destroy()
         self.remove_hotkey()
+        self.engine.shutdown()
         self.bubble.destroy()
         try:
             self.icon.stop()
@@ -1641,10 +2060,6 @@ class TrayApp:
 
 
 def main() -> None:
-    if "--version" in sys.argv:
-        print(APP_VERSION)
-        return
-
     if not acquire_single_instance_lock():
         return
 
