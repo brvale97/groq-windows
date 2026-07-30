@@ -11,7 +11,7 @@ A small dictation app for Windows:
 - You can add names and terms such as `Groq` and `Clinon` with the correct spelling to your personal dictionary.
 - Explicit word replacements can correct known variants such as `Grok` or `Grog` to `Groq` after transcription.
 - The app checks GitHub Releases for updates and can update itself without deleting your API key or settings.
-- A small status icon appears in the bottom-right corner while the app is in use: recording, transcribing, and then ready for another 3 seconds.
+- A small status icon appears centered at the bottom of the screen while the app is in use: recording, transcribing, and then ready for another 3 seconds.
 
 ## Setup
 

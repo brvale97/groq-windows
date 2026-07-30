@@ -11,6 +11,7 @@ class ExistingUiContractTests(unittest.TestCase):
             'self.root.after(3000, self.hide)',
             'self.root.after(70, tick)',
             'self.root.after(120, tick)',
+            'bottom_centered_window_geometry(',
             'self.window_width = 176 if state == "recording" else 162 if state == "processing" else self.button_size',
             'self.window_height = 48 if state in {"recording", "processing"} else self.button_size',
         ):

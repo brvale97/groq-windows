@@ -21,6 +21,10 @@ class WindowsAppTests(unittest.TestCase):
         self.assertEqual(app.centered_window_geometry(380, 170, 1920, 1080), "380x170+770+455")
         self.assertEqual(app.centered_window_geometry(380, 170, 200, 100), "380x170+0+0")
 
+    def test_status_bubble_geometry_is_bottom_centered_and_clamped(self) -> None:
+        self.assertEqual(app.bottom_centered_window_geometry(176, 48, 1920, 1080), "176x48+872+950")
+        self.assertEqual(app.bottom_centered_window_geometry(218, 48, 200, 100), "218x48+0+0")
+
     def test_tray_setup_failure_always_signals_completion(self) -> None:
         tray_app = app.TrayApp.__new__(app.TrayApp)
         tray_app.tray_startup_complete = threading.Event()

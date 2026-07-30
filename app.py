@@ -15,7 +15,7 @@ import wave
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.15"
+APP_VERSION = "0.1.16"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -81,6 +81,18 @@ def app_data_dir() -> Path:
 def centered_window_geometry(width: int, height: int, screen_width: int, screen_height: int) -> str:
     x = max(0, (screen_width - width) // 2)
     y = max(0, (screen_height - height) // 2)
+    return f"{width}x{height}+{x}+{y}"
+
+
+def bottom_centered_window_geometry(
+    width: int,
+    height: int,
+    screen_width: int,
+    screen_height: int,
+    bottom_margin: int = 82,
+) -> str:
+    x = max(0, (screen_width - width) // 2)
+    y = max(0, screen_height - height - bottom_margin)
     return f"{width}x{height}+{x}+{y}"
 
 
@@ -750,11 +762,14 @@ class StatusBubble:
 
     def position(self) -> None:
         try:
-            screen_width = self.window.winfo_screenwidth()
-            screen_height = self.window.winfo_screenheight()
-            x = max(0, screen_width - self.window_width - 26)
-            y = max(0, screen_height - self.window_height - 82)
-            self.window.geometry(f"{self.window_width}x{self.window_height}+{x}+{y}")
+            self.window.geometry(
+                bottom_centered_window_geometry(
+                    self.window_width,
+                    self.window_height,
+                    self.window.winfo_screenwidth(),
+                    self.window.winfo_screenheight(),
+                )
+            )
         except Exception:
             pass
 
