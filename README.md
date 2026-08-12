@@ -52,6 +52,8 @@ Settings are stored in `%APPDATA%\GroqInsertDictation\settings.json`. The API ke
 
 Open the personal dictionary from Settings to add names, jargon, and terms that are often transcribed with the wrong spelling. The app sends these terms as spelling context in the same Groq transcription request. Because Whisper treats that context as a hint rather than a guarantee, add known mistakes such as `Grok → Groq` or `Grog → Groq` in the **Replacements** section directly below the dictionary. Replacements are applied locally after transcription and before the text is copied or pasted. The existing free-form **Prompt** field continues to work alongside the dictionary.
 
+The final period is preserved by default. Enable **Punt aan het einde verwijderen** in Settings if you prefer transcripts without one final period.
+
 - `GROQ_MODEL=whisper-large-v3-turbo` for maximum speed.
 - `GROQ_MODEL=whisper-large-v3` for higher accuracy.
 - `GROQ_LANGUAGE=nl` for Dutch; leave it empty to use automatic language detection.

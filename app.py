@@ -15,7 +15,7 @@ import wave
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.16"
+APP_VERSION = "0.1.17"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -34,6 +34,7 @@ from PIL import Image, ImageDraw
 
 from dictation_core import (
     DictionaryValidationError,
+    apply_final_period_preference,
     apply_word_replacements,
     compose_transcription_prompt,
     normalize_custom_word,
@@ -179,6 +180,7 @@ class Config:
     sample_rate: int = 16_000
     channels: int = 1
     paste_after_transcription: bool = True
+    remove_final_period: bool = False
     autostart: bool = True
     keyring_read_succeeded: bool = field(default=True, repr=False, compare=False)
 
@@ -266,6 +268,7 @@ def load_config() -> Config:
             if "paste_after_transcription" in data
             else env.get("PASTE_AFTER_TRANSCRIPTION", "true").lower() in {"1", "true", "yes", "on"}
         ),
+        remove_final_period=bool(data.get("remove_final_period", False)),
         autostart=bool(data.get("autostart", True)),
         keyring_read_succeeded=keyring_read_succeeded,
     )
@@ -707,12 +710,6 @@ def validate_hotkey(value: str) -> None:
     keyboard.parse_hotkey(value)
 
 
-def remove_final_sentence_period(text: str) -> str:
-    if text.endswith(".") and not text.endswith("..."):
-        return text[:-1]
-    return text
-
-
 class StatusBubble:
     def __init__(self, root: Tk, on_click) -> None:
         self.root = root
@@ -1031,6 +1028,7 @@ class RecordingSession:
     prompt: str
     word_replacements: tuple[tuple[str, str], ...]
     paste_after_transcription: bool
+    remove_final_period: bool
     client: Groq
 
 
@@ -1163,6 +1161,7 @@ class DictationEngine:
                     prompt=compose_transcription_prompt(config.prompt, config.custom_words),
                     word_replacements=config.word_replacements,
                     paste_after_transcription=config.paste_after_transcription,
+                    remove_final_period=config.remove_final_period,
                     client=self.client,
                 )
 
@@ -1317,7 +1316,10 @@ class DictationEngine:
                 self.transcribe(session, wav_path).strip(),
                 session.word_replacements,
             )
-            text = remove_final_sentence_period(text)
+            text = apply_final_period_preference(
+                text,
+                remove_final_period=session.remove_final_period,
+            )
             elapsed = time.perf_counter() - started_at
 
             if not text:
@@ -1650,7 +1652,7 @@ class TrayApp:
         window = Toplevel(self.root)
         self.settings_window = window
         window.title(f"{APP_NAME} instellingen")
-        window.geometry("560x470")
+        window.geometry("560x500")
         window.resizable(False, False)
 
         api_key = StringVar(value=self.config.api_key)
@@ -1665,6 +1667,7 @@ class TrayApp:
         device_labels = {device_id: label for device_id, label in device_options}
         input_device = StringVar(value=device_labels.get(self.config.input_device, "Windows default input"))
         paste = BooleanVar(value=self.config.paste_after_transcription)
+        remove_period = BooleanVar(value=self.config.remove_final_period)
         autostart_var = BooleanVar(value=self.config.autostart or autostart_enabled())
 
         def update_dictionary_summary() -> None:
@@ -1730,15 +1733,18 @@ class TrayApp:
         ttk.Checkbutton(frame, text="Transcriptie automatisch plakken", variable=paste).grid(
             row=7, column=1, sticky="w", pady=6
         )
-        ttk.Checkbutton(frame, text="Start automatisch met Windows", variable=autostart_var).grid(
+        ttk.Checkbutton(frame, text="Punt aan het einde verwijderen", variable=remove_period).grid(
             row=8, column=1, sticky="w", pady=6
+        )
+        ttk.Checkbutton(frame, text="Start automatisch met Windows", variable=autostart_var).grid(
+            row=9, column=1, sticky="w", pady=6
         )
 
         status = StringVar(value=f"Instellingen: {SETTINGS_PATH}")
-        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=9, column=0, columnspan=2, sticky="w", pady=12)
+        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=10, column=0, columnspan=2, sticky="w", pady=12)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=10, column=0, columnspan=2, sticky="e", pady=16)
+        buttons.grid(row=11, column=0, columnspan=2, sticky="e", pady=16)
         capture_bind_id: list[str | None] = [None]
         dictionary_window: list[Toplevel | None] = [None]
 
@@ -2000,6 +2006,7 @@ class TrayApp:
                 sample_rate=self.config.sample_rate,
                 channels=self.config.channels,
                 paste_after_transcription=paste.get(),
+                remove_final_period=remove_period.get(),
                 autostart=autostart_var.get(),
                 # If Credential Manager could not be read at startup, an
                 # unchanged fallback value must not overwrite a newer secret.

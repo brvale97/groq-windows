@@ -3,12 +3,33 @@ import unicodedata
 
 from dictation_core import (
     DictionaryValidationError,
+    apply_final_period_preference,
     apply_word_replacements,
     compose_transcription_prompt,
     normalize_custom_word,
     normalize_custom_words,
     normalize_word_replacements,
 )
+
+
+class FinalPeriodPreferenceTests(unittest.TestCase):
+    def test_keeps_final_period_when_setting_is_disabled(self) -> None:
+        self.assertEqual(
+            apply_final_period_preference("Dit is de laatste zin.", remove_final_period=False),
+            "Dit is de laatste zin.",
+        )
+
+    def test_removes_final_period_when_setting_is_enabled(self) -> None:
+        self.assertEqual(
+            apply_final_period_preference("Dit is de laatste zin.", remove_final_period=True),
+            "Dit is de laatste zin",
+        )
+
+    def test_never_shortens_an_ellipsis(self) -> None:
+        self.assertEqual(
+            apply_final_period_preference("Even denken...", remove_final_period=True),
+            "Even denken...",
+        )
 
 
 class DictionaryTests(unittest.TestCase):

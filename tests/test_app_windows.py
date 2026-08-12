@@ -109,6 +109,7 @@ class WindowsAppTests(unittest.TestCase):
                 word_replacements=(("Grok", "Groq"), ("Grog", "Groq")),
                 sample_rate=48_000,
                 channels=2,
+                remove_final_period=True,
             )
             with (
                 mock.patch.object(app, "APP_DIR", Path(directory)),
@@ -117,10 +118,13 @@ class WindowsAppTests(unittest.TestCase):
             ):
                 app.save_config(config)
                 stored = json.loads(settings_path.read_text(encoding="utf-8"))
+                loaded = app.load_config()
                 self.assertEqual(stored["custom_words"], ["Groq", "Clinon"])
                 self.assertEqual(stored["word_replacements"], [["Grok", "Groq"], ["Grog", "Groq"]])
                 self.assertEqual(stored["sample_rate"], 48_000)
                 self.assertEqual(stored["channels"], 2)
+                self.assertTrue(stored["remove_final_period"])
+                self.assertTrue(loaded.remove_final_period)
                 self.assertNotIn("api_key", stored)
 
     def test_legacy_settings_load_with_an_empty_dictionary(self) -> None:
@@ -136,6 +140,7 @@ class WindowsAppTests(unittest.TestCase):
             self.assertEqual(config.prompt, "Bestaande prompt")
             self.assertEqual(config.custom_words, ())
             self.assertEqual(config.word_replacements, ())
+            self.assertFalse(config.remove_final_period)
 
     def test_clearing_api_key_attempts_keyring_delete_after_read_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -208,6 +213,7 @@ class WindowsAppTests(unittest.TestCase):
             prompt="Vocabulary: Groq.",
             word_replacements=(("Grok", "Groq"),),
             paste_after_transcription=True,
+            remove_final_period=False,
             client=mock.Mock(),
         )
         engine = app.DictationEngine.__new__(app.DictationEngine)
@@ -300,6 +306,7 @@ class WindowsAppTests(unittest.TestCase):
             prompt="Nederlandse vergadering\nVocabulary: Groq, Clinon.",
             word_replacements=(("Grok", "Groq"),),
             paste_after_transcription=True,
+            remove_final_period=False,
             client=client,
         )
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as audio:

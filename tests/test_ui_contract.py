@@ -37,12 +37,23 @@ class ExistingUiContractTests(unittest.TestCase):
             "Shortcut",
             "Microfoon",
             "Transcriptie automatisch plakken",
+            "Punt aan het einde verwijderen",
             "Start automatisch met Windows",
             "Geluiden testen",
             "Annuleren",
             "Opslaan",
         ):
             self.assertIn(f'text="{label}"', APP_SOURCE)
+
+    def test_final_period_option_defaults_to_off_and_is_wired(self) -> None:
+        for snippet in (
+            "remove_final_period: bool = False",
+            "remove_final_period=bool(data.get(\"remove_final_period\", False))",
+            "BooleanVar(value=self.config.remove_final_period)",
+            "remove_final_period=remove_period.get()",
+            "remove_final_period=session.remove_final_period",
+        ):
+            self.assertIn(snippet, APP_SOURCE)
 
     def test_startup_splash_waits_for_the_visible_tray_icon(self) -> None:
         for snippet in (

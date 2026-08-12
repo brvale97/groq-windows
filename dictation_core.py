@@ -142,3 +142,9 @@ def apply_word_replacements(text: str, replacements: Sequence[tuple[str, str]]) 
         pattern = re.compile(rf"(?<!\w){re.escape(source)}(?!\w)", re.IGNORECASE)
         result = pattern.sub(lambda _match, replacement=target: replacement, result)
     return result
+
+
+def apply_final_period_preference(text: str, *, remove_final_period: bool) -> str:
+    if remove_final_period and text.endswith(".") and not text.endswith("..."):
+        return text[:-1]
+    return text
