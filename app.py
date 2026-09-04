@@ -15,7 +15,7 @@ import wave
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.17"
+APP_VERSION = "0.1.18"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -30,7 +30,7 @@ import pyperclip
 import pystray
 import sounddevice as sd
 from groq import Groq
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 from dictation_core import (
     DictionaryValidationError,
@@ -1033,8 +1033,8 @@ class RecordingSession:
 
 
 class StartupSplash:
-    width = 380
-    height = 170
+    width = 440
+    height = 190
 
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -1412,12 +1412,76 @@ class DictationEngine:
                     pass
 
 
+def configure_ui(root: Tk) -> None:
+    """One shared, DPI-aware visual language for all settings dialogs."""
+    root.option_add("*Listbox.font", ("Segoe UI", 10))
+    root.option_add("*TEntry.font", ("Segoe UI", 10))
+    root.option_add("*TCombobox.font", ("Segoe UI", 10))
+    root.option_add("*Listbox.background", "#ffffff")
+    root.option_add("*Listbox.foreground", "#202b36")
+    root.option_add("*Listbox.selectBackground", "#dceee8")
+    root.option_add("*Listbox.selectForeground", "#145c48")
+    root.option_add("*Listbox.relief", "flat")
+    root.option_add("*Listbox.highlightThickness", 1)
+    root.option_add("*Listbox.highlightBackground", "#dce3e0")
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure(".", font=("Segoe UI", 10), background="#ffffff", foreground="#202b36")
+    style.configure("TFrame", background="#ffffff")
+    style.configure("Shell.TFrame", background="#f3f6f5")
+    style.configure("TLabel", background="#ffffff")
+    style.configure("Muted.TLabel", foreground="#65756e")
+    style.configure("Title.TLabel", font=("Segoe UI", 24, "bold"))
+    style.configure("Heading.TLabel", font=("Segoe UI", 12, "bold"))
+    style.configure("Brand.TLabel", font=("Segoe UI", 17, "bold"), background="#f3f6f5", foreground="#145c48")
+    style.configure("Side.TLabel", background="#f3f6f5", foreground="#65756e")
+    style.configure("TButton", padding=(14, 9), background="#f3f6f5", borderwidth=0, focusthickness=2, focuscolor="#a0c9bb")
+    style.map("TButton", background=[("active", "#e5ece9"), ("pressed", "#dce3e0")])
+    style.configure("Accent.TButton", background="#176b53", foreground="#ffffff")
+    style.map("Accent.TButton", background=[("pressed", "#104b3a"), ("active", "#208065")], foreground=[("disabled", "#b6c8c1"), ("!disabled", "#ffffff")])
+    style.configure("Nav.TButton", anchor="w", padding=(16, 12), background="#f3f6f5", foreground="#53675e")
+    style.map("Nav.TButton", background=[("selected", "#dceee8"), ("active", "#e7eeeb")], foreground=[("selected", "#145c48")])
+    style.configure("TEntry", padding=9, fieldbackground="#ffffff", bordercolor="#dce3e0", lightcolor="#ffffff", darkcolor="#ffffff")
+    style.map("TEntry", bordercolor=[("focus", "#208065")])
+    style.configure("TCombobox", padding=8, bordercolor="#dce3e0", arrowsize=14)
+    style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")], selectbackground=[("readonly", "#ffffff")], selectforeground=[("readonly", "#202b36")])
+    # Draw switches at the active Tk scale; retain images for Tcl's lifetime.
+    switch_scale = float(root.tk.call("tk", "scaling")) / (96 / 72)
+    switch_width = max(32, round(36 * switch_scale))
+    switch_height = max(18, round(20 * switch_scale))
+    root._switch_images = []
+    for enabled in (False, True):
+        bitmap = Image.new("RGBA", (switch_width * 3, switch_height * 3), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(bitmap)
+        width, height = bitmap.size
+        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=height // 2, fill="#176b53" if enabled else "#a7b5af")
+        x = width - height if enabled else 0
+        draw.ellipse((x + 7, 7, x + height - 8, height - 8), fill="#ffffff")
+        bitmap = bitmap.resize((switch_width, switch_height), Image.Resampling.LANCZOS)
+        padded = Image.new("RGBA", (switch_width + round(10 * switch_scale), switch_height), (255, 255, 255, 0))
+        padded.paste(bitmap, (0, 0))
+        root._switch_images.append(ImageTk.PhotoImage(padded, master=root))
+    style.element_create("Switch.indicator", "image", root._switch_images[0], ("selected", root._switch_images[1]), sticky="w", border=0)
+    style.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+        ("Switch.indicator", {"side": "left", "sticky": "w"}),
+        ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+            ("Checkbutton.label", {"sticky": "nswe"})
+        ]}),
+    ]})])
+    style.configure("TCheckbutton", padding=(0, 8), background="#ffffff", space=10)
+    style.map("TCheckbutton", background=[("active", "#ffffff")])
+    style.configure("TLabelframe", bordercolor="#dce3e0", relief="solid")
+    style.configure("TLabelframe.Label", font=("Segoe UI", 11, "bold"))
+    style.configure("Horizontal.TProgressbar", background="#176b53", troughcolor="#e7eeeb", borderwidth=0)
+
+
 class TrayApp:
     def __init__(self) -> None:
         setup_logging()
         self.root = Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
+        configure_ui(self.root)
         self.splash = StartupSplash(self.root)
         self.tray_startup_complete = threading.Event()
         self.tray_startup_error: Exception | None = None
@@ -1539,7 +1603,7 @@ class TrayApp:
         self.startup_finished = True
         self.splash.destroy()
 
-        if not self.config.api_key:
+        if not self.config.api_key or "--settings" in sys.argv:
             self.root.after(250, self.open_settings)
         self.root.after(2500, self.check_for_updates_auto)
         self.root.after(5000, cleanup_confirmed_update_backup)
@@ -1652,8 +1716,9 @@ class TrayApp:
         window = Toplevel(self.root)
         self.settings_window = window
         window.title(f"{APP_NAME} instellingen")
-        window.geometry("560x500")
-        window.resizable(False, False)
+        window.geometry("960x720")
+        window.minsize(960, 720)
+        window.resizable(True, True)
 
         api_key = StringVar(value=self.config.api_key)
         model = StringVar(value=self.config.model)
@@ -1683,68 +1748,105 @@ class TrayApp:
 
         update_dictionary_summary()
 
-        frame = ttk.Frame(window, padding=18)
-        frame.pack(fill="both", expand=True)
-        frame.columnconfigure(1, weight=1)
+        shell = ttk.Frame(window, style="Shell.TFrame")
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(1, weight=1)
+        shell.rowconfigure(0, weight=1)
+        sidebar = ttk.Frame(shell, style="Shell.TFrame", padding=(24, 30))
+        sidebar.grid(row=0, column=0, sticky="ns")
+        ttk.Label(sidebar, text="groq / dictation", style="Brand.TLabel").pack(anchor="w")
+        ttk.Label(sidebar, text="Van stem naar tekst", style="Side.TLabel").pack(anchor="w", pady=(4, 36))
+        navigation = ttk.Frame(sidebar, style="Shell.TFrame")
+        navigation.pack(fill="x")
+        ttk.Label(sidebar, text=f"Versie {APP_VERSION}", style="Side.TLabel").pack(side="bottom", anchor="w")
 
-        ttk.Label(frame, text="Groq API key").grid(row=0, column=0, sticky="w", pady=6)
-        ttk.Entry(frame, textvariable=api_key, show="*", width=46).grid(row=0, column=1, sticky="ew", pady=6)
+        content = ttk.Frame(shell, padding=(32, 28))
+        content.grid(row=0, column=1, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(2, weight=1)
+        title = StringVar(value="Dicteren")
+        subtitle = StringVar(value="Jouw stem. Direct op de juiste plek.")
+        ttk.Label(content, textvariable=title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(content, textvariable=subtitle, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 24))
+        pages = ttk.Frame(content)
+        pages.grid(row=2, column=0, sticky="nsew")
+        pages.columnconfigure(0, weight=1)
+        pages.rowconfigure(0, weight=1)
+        page_frames = []
+        nav_buttons = []
 
-        ttk.Label(frame, text="Model").grid(row=1, column=0, sticky="w", pady=6)
-        ttk.Combobox(
-            frame,
-            textvariable=model,
-            values=("whisper-large-v3-turbo", "whisper-large-v3"),
-            state="readonly",
-        ).grid(row=1, column=1, sticky="ew", pady=6)
+        def select_page(index: int) -> None:
+            for i, page in enumerate(page_frames):
+                if i == index:
+                    page.grid()
+                else:
+                    page.grid_remove()
+                nav_buttons[i].state(["selected"] if i == index else ["!selected"])
+            title.set(page_info[index][0])
+            subtitle.set(page_info[index][1])
 
-        ttk.Label(frame, text="Taal").grid(row=2, column=0, sticky="w", pady=6)
-        ttk.Entry(frame, textvariable=language).grid(row=2, column=1, sticky="ew", pady=6)
-
-        ttk.Label(frame, text="Prompt").grid(row=3, column=0, sticky="nw", pady=6)
-        ttk.Entry(frame, textvariable=prompt).grid(row=3, column=1, sticky="ew", pady=6)
-
-        ttk.Label(frame, text="Woordenboek").grid(row=4, column=0, sticky="w", pady=6)
-        dictionary_frame = ttk.Frame(frame)
-        dictionary_frame.grid(row=4, column=1, sticky="ew", pady=6)
-        dictionary_frame.columnconfigure(0, weight=1)
-        ttk.Label(dictionary_frame, textvariable=dictionary_summary, foreground="#555").grid(
-            row=0, column=0, sticky="w"
+        page_info = (
+            ("Dicteren", "Jouw stem. Direct op de juiste plek."),
+            ("Herkenning", "Laat Groq jouw taal en woorden beter begrijpen."),
+            ("Verbinding", "Verbind met Groq en kies je transcriptiemodel."),
         )
-        dictionary_button = ttk.Button(dictionary_frame, text="Beheren...")
-        dictionary_button.grid(row=0, column=1)
+        for index, (label, _) in enumerate(page_info):
+            page = ttk.Frame(pages)
+            page.grid(row=0, column=0, sticky="nsew")
+            page.columnconfigure(0, weight=1)
+            page_frames.append(page)
+            button = ttk.Button(navigation, text=label, style="Nav.TButton", command=lambda i=index: select_page(i))
+            button.pack(fill="x", pady=3)
+            nav_buttons.append(button)
+        dictate, recognition, connection = page_frames
 
-        ttk.Label(frame, text="Shortcut").grid(row=5, column=0, sticky="w", pady=6)
-        shortcut_frame = ttk.Frame(frame)
-        shortcut_frame.grid(row=5, column=1, sticky="ew", pady=6)
+        ttk.Label(dictate, text="Shortcut", style="Heading.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(dictate, text="Druk eenmaal om op te nemen, nogmaals om te stoppen.", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 10))
+        shortcut_frame = ttk.Frame(dictate)
+        shortcut_frame.grid(row=2, column=0, sticky="ew")
         shortcut_frame.columnconfigure(0, weight=1)
         ttk.Entry(shortcut_frame, textvariable=shortcut).grid(row=0, column=0, sticky="ew")
         capture_button = ttk.Button(shortcut_frame, text="Wijzig")
-        capture_button.grid(row=0, column=1, padx=(8, 0))
+        capture_button.grid(row=0, column=1, padx=(10, 0))
+        ttk.Label(dictate, text="Microfoon", style="Heading.TLabel").grid(row=3, column=0, sticky="w", pady=(24, 10))
+        ttk.Combobox(dictate, textvariable=input_device, values=[label for _, label in device_options], state="readonly").grid(row=4, column=0, sticky="ew")
+        ttk.Separator(dictate).grid(row=5, column=0, sticky="ew", pady=22)
+        ttk.Checkbutton(dictate, text="Transcriptie automatisch plakken", variable=paste).grid(row=6, column=0, sticky="w")
+        ttk.Checkbutton(dictate, text="Punt aan het einde verwijderen", variable=remove_period).grid(row=7, column=0, sticky="w")
+        ttk.Checkbutton(dictate, text="Start automatisch met Windows", variable=autostart_var).grid(row=8, column=0, sticky="w")
+        ttk.Button(dictate, text="Geluiden testen", command=self.test_sounds).grid(row=9, column=0, sticky="w", pady=(14, 0))
 
-        ttk.Label(frame, text="Microfoon").grid(row=6, column=0, sticky="w", pady=6)
-        ttk.Combobox(
-            frame,
-            textvariable=input_device,
-            values=[label for _, label in device_options],
-            state="readonly",
-        ).grid(row=6, column=1, sticky="ew", pady=6)
+        ttk.Label(recognition, text="Taal", style="Heading.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(recognition, text="Bijvoorbeeld nl voor Nederlands. Leeg = automatisch herkennen.", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 10))
+        ttk.Entry(recognition, textvariable=language).grid(row=2, column=0, sticky="ew")
+        ttk.Label(recognition, text="Prompt", style="Heading.TLabel").grid(row=3, column=0, sticky="w", pady=(24, 4))
+        ttk.Label(recognition, text="Optionele context voor de herkenning van je opname.", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(0, 10))
+        ttk.Entry(recognition, textvariable=prompt).grid(row=5, column=0, sticky="ew")
+        ttk.Separator(recognition).grid(row=6, column=0, sticky="ew", pady=24)
+        ttk.Label(recognition, text="Woordenboek", style="Heading.TLabel").grid(row=7, column=0, sticky="w")
+        ttk.Label(recognition, text="Je eigen namen, vaktermen en vaste correcties.", style="Muted.TLabel").grid(row=8, column=0, sticky="w", pady=(4, 12))
+        dictionary_frame = ttk.Frame(recognition)
+        dictionary_frame.grid(row=9, column=0, sticky="ew")
+        dictionary_frame.columnconfigure(0, weight=1)
+        ttk.Label(dictionary_frame, textvariable=dictionary_summary, style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+        dictionary_button = ttk.Button(dictionary_frame, text="Woordenboek openen")
+        dictionary_button.grid(row=0, column=1)
 
-        ttk.Checkbutton(frame, text="Transcriptie automatisch plakken", variable=paste).grid(
-            row=7, column=1, sticky="w", pady=6
-        )
-        ttk.Checkbutton(frame, text="Punt aan het einde verwijderen", variable=remove_period).grid(
-            row=8, column=1, sticky="w", pady=6
-        )
-        ttk.Checkbutton(frame, text="Start automatisch met Windows", variable=autostart_var).grid(
-            row=9, column=1, sticky="w", pady=6
-        )
+        ttk.Label(connection, text="Groq API key", style="Heading.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(connection, text="Je sleutel wordt gebruikt om audio naar Groq te versturen.", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 10))
+        ttk.Entry(connection, textvariable=api_key, show="*", width=36).grid(row=2, column=0, sticky="ew")
+        ttk.Label(connection, text="Model", style="Heading.TLabel").grid(row=3, column=0, sticky="w", pady=(28, 10))
+        ttk.Combobox(connection, textvariable=model, values=("whisper-large-v3-turbo", "whisper-large-v3"), state="readonly").grid(row=4, column=0, sticky="ew")
+        ttk.Label(connection, text="Turbo voor snelheid. V3 voor hogere nauwkeurigheid.", style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        select_page(0 if self.config.api_key else 2)
 
-        status = StringVar(value=f"Instellingen: {SETTINGS_PATH}")
-        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=10, column=0, columnspan=2, sticky="w", pady=12)
-
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=11, column=0, columnspan=2, sticky="e", pady=16)
+        status = StringVar(value="Wijzigingen worden bewaard zodra je op Opslaan klikt.")
+        footer = ttk.Frame(shell, padding=(24, 16))
+        footer.grid(row=1, column=0, columnspan=2, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(footer, textvariable=status, style="Muted.TLabel", wraplength=460).grid(row=0, column=0, sticky="w")
+        buttons = ttk.Frame(footer)
+        buttons.grid(row=0, column=1, sticky="e")
         capture_bind_id: list[str | None] = [None]
         dictionary_window: list[Toplevel | None] = [None]
 
@@ -1758,8 +1860,9 @@ class TrayApp:
             dialog = Toplevel(window)
             dictionary_window[0] = dialog
             dialog.title("Persoonlijk woordenboek")
-            dialog.geometry("600x620")
-            dialog.resizable(False, False)
+            dialog.geometry("680x760")
+            dialog.minsize(640, 700)
+            dialog.resizable(True, True)
             dialog.transient(window)
 
             def close_dialog() -> None:
@@ -2029,9 +2132,8 @@ class TrayApp:
             status.set("Opgeslagen.")
             window.destroy()
 
-        ttk.Button(buttons, text="Geluiden testen", command=self.test_sounds).pack(side="left", padx=6)
         ttk.Button(buttons, text="Annuleren", command=lambda: (stop_capture(restore_hotkey=True), window.destroy())).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Opslaan", command=save).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Opslaan", style="Accent.TButton", command=save).pack(side="left", padx=6)
         window.protocol("WM_DELETE_WINDOW", lambda: (stop_capture(restore_hotkey=True), window.destroy()))
 
     def test_sounds(self) -> None:

@@ -71,3 +71,14 @@ The app checks for a newer GitHub Release when it starts. If an update is availa
 ## Note
 
 The app pastes text using `Ctrl+V` instead of typing it character by character. This is faster and works better with Dutch characters, punctuation, and longer text. Because the transcript is copied to the clipboard first, you can always paste it manually if automatic pasting fails.
+
+## Refreshed interface (0.1.18)
+
+The refreshed settings use a light theme, sidebar navigation (Dicteren, Herkenning,
+Verbinding), clearer typography, and switches. Dictation and saved settings retain
+their existing behavior. Launch `GroqInsertDictation.exe --settings` to open the
+settings after startup. Close any running copy from the system tray before testing
+a different build. Both builds use the same settings; Cancel discards edits.
+
+The Windows widget test requires an interactive desktop. It verifies navigation,
+visible control bounds, the dictionary dialog, and cancelling without saving.
