@@ -5,7 +5,12 @@ $python = & ".\bootstrap.ps1" -Profile build | Select-Object -Last 1
 
 Remove-Item -LiteralPath ".\dist\GroqInsertDictation.exe" -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath ".\dist\GroqInsertDictation.build.json" -Force -ErrorAction SilentlyContinue
-& $python -m PyInstaller --noconsole --onefile --name GroqInsertDictation app.py
+New-Item -ItemType Directory -Force -Path ".\build" | Out-Null
+& $python .\branding.py ".\build\GroqInsertDictation.ico"
+if ($LASTEXITCODE -ne 0) {
+    throw "App-icoon genereren is mislukt met exitcode $LASTEXITCODE."
+}
+& $python -m PyInstaller --noconsole --onefile --name GroqInsertDictation --icon ".\build\GroqInsertDictation.ico" app.py
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller is mislukt met exitcode $LASTEXITCODE."
 }
@@ -25,6 +30,10 @@ if ($LASTEXITCODE -ne 0) {
 $buildInfo = [ordered]@{
     app_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "app.py").Hash.ToLowerInvariant()
     core_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "dictation_core.py").Hash.ToLowerInvariant()
+    hotkeys_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "hotkeys.py").Hash.ToLowerInvariant()
+    history_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "history.py").Hash.ToLowerInvariant()
+    branding_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "branding.py").Hash.ToLowerInvariant()
+    settings_ui_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "settings_ui.py").Hash.ToLowerInvariant()
     requirements_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "requirements.txt").Hash.ToLowerInvariant()
     build_requirements_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "requirements-build.txt").Hash.ToLowerInvariant()
     bootstrap_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath "bootstrap.ps1").Hash.ToLowerInvariant()

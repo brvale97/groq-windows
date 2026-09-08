@@ -72,13 +72,35 @@ The app checks for a newer GitHub Release when it starts. If an update is availa
 
 The app pastes text using `Ctrl+V` instead of typing it character by character. This is faster and works better with Dutch characters, punctuation, and longer text. Because the transcript is copied to the clipboard first, you can always paste it manually if automatic pasting fails.
 
-## Refreshed interface (0.1.18)
+## Interface and reliability (0.1.19)
 
-The refreshed settings use a light theme, sidebar navigation (Dicteren, Herkenning,
-Verbinding), clearer typography, and switches. Dictation and saved settings retain
-their existing behavior. Launch `GroqInsertDictation.exe --settings` to open the
-settings after startup. Close any running copy from the system tray before testing
-a different build. Both builds use the same settings; Cancel discards edits.
+The settings window was rebuilt around five pages in a fixed sidebar: **Dicteren**
+(shortcut, microphone, behaviour switches), **Herkenning** (language, multi-line
+prompt), **Woordenboek** (words and replacements side by side, no separate dialog),
+**Verbinding** (API key with show/hide and a "Verbinding testen" button, model) and
+**Over** (version, update check, log file, restart). Unsaved edits are flagged in the
+footer and confirmed before closing. Launch `GroqInsertDictation.exe --settings` to
+open the settings after startup. The UI code lives in `settings_ui.py`.
 
-The Windows widget test requires an interactive desktop. It verifies navigation,
-visible control bounds, the dictionary dialog, and cancelling without saving.
+The global shortcut no longer uses a low-level keyboard hook (`keyboard` package).
+Windows silently removes such a hook when its callback is slow, which is why the
+shortcut could stop working until the app was restarted. `hotkeys.py` now registers
+the shortcut with the Win32 `RegisterHotKey` API on its own message loop: the OS
+consumes the key combination, delivers it as a message, and recording starts and
+stops on a worker thread. Saved shortcut strings such as `alt+z`, `insert` or
+`ctrl+shift+f9` keep working. If another program already owns the combination the
+app starts anyway and asks you to pick a different shortcut.
+
+Clicking the floating status bubble now stops a running recording; when idle it
+opens the settings.
+
+**Geschiedenis** keeps the last twenty transcriptions (newest first) with a copy button
+per entry and a "Geschiedenis wissen" button. It is stored locally in
+`%APPDATA%\GroqInsertDictation\history.json` and is also reachable from the tray menu.
+
+The app now ships its own icon (`branding.py`): embedded in the executable, used by the
+tray and shown on every window and in the taskbar instead of the default Tk feather.
+
+The Windows widget tests require an interactive desktop. They verify navigation,
+visible control bounds, dictionary edits, saving, shortcut capture and cancelling
+without saving.

@@ -2,7 +2,10 @@ import unittest
 from pathlib import Path
 
 
-APP_SOURCE = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
+ROOT = Path(__file__).parents[1]
+APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+SETTINGS_SOURCE = (ROOT / "settings_ui.py").read_text(encoding="utf-8")
+HOTKEYS_SOURCE = (ROOT / "hotkeys.py").read_text(encoding="utf-8")
 
 
 class ExistingUiContractTests(unittest.TestCase):
@@ -43,17 +46,23 @@ class ExistingUiContractTests(unittest.TestCase):
             "Annuleren",
             "Opslaan",
         ):
-            self.assertIn(f'text="{label}"', APP_SOURCE)
+            self.assertTrue(
+                f'text="{label}"' in SETTINGS_SOURCE or f'"{label}"' in SETTINGS_SOURCE,
+                label,
+            )
 
     def test_final_period_option_defaults_to_off_and_is_wired(self) -> None:
         for snippet in (
             "remove_final_period: bool = False",
             "remove_final_period=bool(data.get(\"remove_final_period\", False))",
-            "BooleanVar(value=self.config.remove_final_period)",
-            "remove_final_period=remove_period.get()",
             "remove_final_period=session.remove_final_period",
         ):
             self.assertIn(snippet, APP_SOURCE)
+        for snippet in (
+            "BooleanVar(value=config.remove_final_period)",
+            "remove_final_period=self.remove_period.get()",
+        ):
+            self.assertIn(snippet, SETTINGS_SOURCE)
 
     def test_startup_splash_waits_for_the_visible_tray_icon(self) -> None:
         for snippet in (
@@ -75,11 +84,52 @@ class ExistingUiContractTests(unittest.TestCase):
         finish_source = APP_SOURCE[finish_start:next_method]
         self.assertLess(finish_source.index("self.splash.destroy()"), finish_source.index("self.open_settings"))
 
-    def test_words_and_replacements_share_one_dictionary_dialog(self) -> None:
-        self.assertIn('ttk.LabelFrame(dialog_frame, text="Vervangingen"', APP_SOURCE)
-        self.assertIn("create_replacements_section()", APP_SOURCE)
-        self.assertNotIn('text="Vervangingen..."', APP_SOURCE)
-        self.assertNotIn("replacements_dialog = Toplevel(dialog)", APP_SOURCE)
+    def test_words_and_replacements_live_on_one_dictionary_page(self) -> None:
+        self.assertIn('("dictionary", "Woordenboek"', SETTINGS_SOURCE)
+        self.assertIn('"Woorden",', SETTINGS_SOURCE)
+        self.assertIn('"Vervangingen",', SETTINGS_SOURCE)
+        self.assertNotIn("Woordenboek openen", SETTINGS_SOURCE)
+        self.assertNotIn("Toplevel(window)", SETTINGS_SOURCE)
+
+
+class HistoryContractTests(unittest.TestCase):
+    def test_history_is_recorded_after_a_successful_transcription(self) -> None:
+        start = APP_SOURCE.index("    def transcribe_and_output(")
+        end = APP_SOURCE.index("    def transcribe(", start)
+        body = APP_SOURCE[start:end]
+        self.assertLess(body.index("pyperclip.copy(text)\n"), body.index("self.transcript_callback(text)"))
+        self.assertIn('pystray.MenuItem("Geschiedenis"', APP_SOURCE)
+        self.assertIn('("history", "Geschiedenis"', SETTINGS_SOURCE)
+        self.assertIn('text="Kopiëren"', SETTINGS_SOURCE)
+
+
+class ShortcutReliabilityContractTests(unittest.TestCase):
+    """Guard the fixes for 'the shortcut stops working until I restart'."""
+
+    def test_low_level_keyboard_hook_library_is_gone(self) -> None:
+        self.assertNotIn("import keyboard", APP_SOURCE)
+        self.assertNotIn("keyboard.add_hotkey", APP_SOURCE)
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        self.assertNotIn("keyboard==", requirements)
+
+    def test_shortcut_uses_register_hotkey_with_no_repeat(self) -> None:
+        self.assertIn("user32.RegisterHotKey(", HOTKEYS_SOURCE)
+        self.assertIn("MOD_NOREPEAT", HOTKEYS_SOURCE)
+        self.assertIn("HotkeyListener(self.engine.on_shortcut)", APP_SOURCE)
+
+    def test_shortcut_handler_never_blocks_the_reporting_thread(self) -> None:
+        start = APP_SOURCE.index("    def on_shortcut(self) -> None:")
+        end = APP_SOURCE.index("    def toggle_recording(self) -> None:")
+        self.assertIn("threading.Thread(target=self.toggle_recording", APP_SOURCE[start:end])
+
+    def test_bubble_click_stops_a_running_recording(self) -> None:
+        self.assertIn("StatusBubble(self.root, self.on_bubble_click)", APP_SOURCE)
+        start = APP_SOURCE.index("    def on_bubble_click(self) -> None:")
+        end = APP_SOURCE.index("    def install_hotkey(self) -> None:")
+        body = APP_SOURCE[start:end]
+        self.assertIn('if state == "recording":', body)
+        self.assertIn("self.engine.on_shortcut()", body)
+        self.assertIn('elif state == "idle":', body)
 
 
 if __name__ == "__main__":
