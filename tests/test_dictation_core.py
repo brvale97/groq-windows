@@ -3,6 +3,7 @@ import unicodedata
 
 from dictation_core import (
     DictionaryValidationError,
+    append_trailing_space,
     apply_final_period_preference,
     apply_word_replacements,
     compose_transcription_prompt,
@@ -30,6 +31,18 @@ class FinalPeriodPreferenceTests(unittest.TestCase):
             apply_final_period_preference("Even denken...", remove_final_period=True),
             "Even denken...",
         )
+
+
+class TrailingSpaceTests(unittest.TestCase):
+    def test_adds_one_space_after_the_transcription(self) -> None:
+        self.assertEqual(append_trailing_space("Dit is een zin."), "Dit is een zin. ")
+
+    def test_does_not_double_an_existing_space(self) -> None:
+        self.assertEqual(append_trailing_space("Dit is een zin. "), "Dit is een zin. ")
+        self.assertEqual(append_trailing_space("Dit is een zin.\n"), "Dit is een zin.\n")
+
+    def test_leaves_empty_text_alone(self) -> None:
+        self.assertEqual(append_trailing_space(""), "")
 
 
 class DictionaryTests(unittest.TestCase):

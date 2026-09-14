@@ -97,10 +97,22 @@ class HistoryContractTests(unittest.TestCase):
         start = APP_SOURCE.index("    def transcribe_and_output(")
         end = APP_SOURCE.index("    def transcribe(", start)
         body = APP_SOURCE[start:end]
-        self.assertLess(body.index("pyperclip.copy(text)\n"), body.index("self.transcript_callback(text)"))
+        self.assertLess(
+            body.index("pyperclip.copy(pasted_text)"),
+            body.index("self.transcript_callback(text)"),
+        )
         self.assertIn('pystray.MenuItem("Geschiedenis"', APP_SOURCE)
         self.assertIn('("history", "Geschiedenis"', SETTINGS_SOURCE)
         self.assertIn('text="Kopiëren"', SETTINGS_SOURCE)
+
+
+    def test_pasted_text_gets_a_trailing_space_but_history_does_not(self) -> None:
+        start = APP_SOURCE.index("    def transcribe_and_output(")
+        end = APP_SOURCE.index("    def transcribe(", start)
+        body = APP_SOURCE[start:end]
+        self.assertIn("pasted_text = append_trailing_space(text)", body)
+        self.assertIn("pyperclip.copy(pasted_text)", body)
+        self.assertIn("self.transcript_callback(text)", body)
 
 
 class ShortcutReliabilityContractTests(unittest.TestCase):

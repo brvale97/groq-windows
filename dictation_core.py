@@ -148,3 +148,10 @@ def apply_final_period_preference(text: str, *, remove_final_period: bool) -> st
     if remove_final_period and text.endswith(".") and not text.endswith("..."):
         return text[:-1]
     return text
+
+
+def append_trailing_space(text: str) -> str:
+    """Add one trailing space so the next words start cleanly after a paste."""
+    if not text or text[-1].isspace():
+        return text
+    return f"{text} "

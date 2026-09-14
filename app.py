@@ -16,7 +16,7 @@ import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.19"
+APP_VERSION = "0.1.20"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -33,6 +33,7 @@ from groq import Groq
 from PIL import Image, ImageTk
 
 from dictation_core import (
+    append_trailing_space,
     apply_final_period_preference,
     apply_word_replacements,
     compose_transcription_prompt,
@@ -1298,7 +1299,8 @@ class DictationEngine:
                 play_sound("error.wav")
                 return
 
-            pyperclip.copy(text)
+            pasted_text = append_trailing_space(text)
+            pyperclip.copy(pasted_text)
             self.notify(f"Transcriptie klaar in {elapsed:.1f}s. Tekst staat op je klembord.")
             try:
                 self.transcript_callback(text)
