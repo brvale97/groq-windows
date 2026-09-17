@@ -1,5 +1,8 @@
 .env
 .venv/
+.build-python-313/
+.git-ca/
+get-pip.build.py
 __pycache__/
 *.py[cod]
 

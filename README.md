@@ -1,5 +1,8 @@
 # Groq Windows Dictation
 
+HTTPS requests use the Windows trusted certificate store, including trusted
+enterprise inspection certificates. TLS certificate verification remains enabled.
+
 A small dictation app for Windows:
 
 - The configured shortcut starts recording.

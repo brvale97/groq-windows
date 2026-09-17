@@ -6,6 +6,15 @@ ROOT = Path(__file__).parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 SETTINGS_SOURCE = (ROOT / "settings_ui.py").read_text(encoding="utf-8")
 HOTKEYS_SOURCE = (ROOT / "hotkeys.py").read_text(encoding="utf-8")
+REQUIREMENTS = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+
+class NetworkTrustContractTests(unittest.TestCase):
+    def test_windows_certificate_store_is_enabled_before_groq_import(self) -> None:
+        inject = APP_SOURCE.index("truststore.inject_into_ssl()")
+        groq_import = APP_SOURCE.index("from groq import Groq")
+        self.assertLess(inject, groq_import)
+        self.assertIn("truststore==0.10.4", REQUIREMENTS)
 
 
 class ExistingUiContractTests(unittest.TestCase):

@@ -16,7 +16,7 @@ import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.20"
+APP_VERSION = "0.1.21"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -29,6 +29,12 @@ import pyautogui
 import pyperclip
 import pystray
 import sounddevice as sd
+import truststore
+
+# Use Windows' trusted certificate store. This keeps TLS verification enabled
+# while supporting managed networks that add a trusted inspection CA.
+truststore.inject_into_ssl()
+
 from groq import Groq
 from PIL import Image, ImageTk
 
