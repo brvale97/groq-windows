@@ -389,6 +389,8 @@ class HotkeyListener:
     def start(self) -> None:
         if os.name != "nt" or self._thread is not None:
             return
+        self._stopped = False
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, name="hotkey-loop", daemon=True)
         self._thread.start()
         if not self._ready.wait(5):
@@ -405,6 +407,10 @@ class HotkeyListener:
         user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
         self._thread.join(3)
         self._thread = None
+        # A later set_hotkey() starts a fresh loop thread; leaving the old id
+        # and the ready flag behind would post the message into nowhere.
+        self._thread_id = None
+        self._ready.clear()
         self.current = None
 
     # -- registration --------------------------------------------------------

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-from tkinter import END, BooleanVar, Canvas, Listbox, StringVar, Text, Tk, Toplevel, messagebox, ttk
+from tkinter import END, BooleanVar, Canvas, Listbox, StringVar, TclError, Text, Tk, Toplevel, messagebox, ttk
 from typing import Protocol
 
 from PIL import Image, ImageDraw, ImageTk
@@ -379,9 +379,13 @@ class ScrollableFrame(ttk.Frame):
         self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        # Tk also fires <Leave> on the inner frame when the pointer moves into
+        # one of its children, so unbinding there would kill the wheel as soon
+        # as you hover a card. Claim the wheel on <Enter> instead and let the
+        # handler decide from the pointer position whether this canvas owns it.
         for widget in (self.canvas, self.inner):
             widget.bind("<Enter>", lambda _event: self._bind_wheel())
-            widget.bind("<Leave>", lambda _event: self._unbind_wheel())
+        self.bind("<Destroy>", self._on_destroy)
 
     def _on_inner_configure(self, _event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -405,7 +409,31 @@ class ScrollableFrame(ttk.Frame):
     def _unbind_wheel(self) -> None:
         self.canvas.unbind_all("<MouseWheel>")
 
+    def _on_destroy(self, event) -> None:
+        # Tk hands out the widget path as a string in some versions.
+        if str(event.widget) == str(self):
+            try:
+                self._unbind_wheel()
+            except Exception:
+                pass
+
+    def _pointer_over_canvas(self) -> bool:
+        """True when the mouse is over this canvas or anything inside it."""
+        try:
+            widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
+        except Exception:
+            return False
+        while widget is not None:
+            if widget is self.canvas:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
     def _on_wheel(self, event) -> None:
+        # Windows delivers <MouseWheel> to the focused widget, so the pointer
+        # position is the only reliable owner check.
+        if not self._pointer_over_canvas():
+            return
         if self.inner.winfo_reqheight() <= self.canvas.winfo_height():
             return
         self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
@@ -984,7 +1012,11 @@ class SettingsWindow(Toplevel):
                 self.test_button.state(["!disabled"])
                 self.connection_result.configure(text=message, style=style)
 
-            self.after(0, show)
+            try:
+                self.after(0, show)
+            except TclError:
+                # Window closed while the request was in flight.
+                pass
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1032,6 +1064,15 @@ class SettingsWindow(Toplevel):
         try:
             self.controller.apply_settings(new_config)
         except HotkeyError as exc:
+            # Everything except the shortcut was stored. Re-baseline on what is
+            # now on disk, so closing does not offer to discard saved changes.
+            self.original = self.controller.config
+            self.dirty = normalize_hotkey_text(self.shortcut.get()) != self.original.shortcut
+            if self.dirty:
+                self.status.set("Alleen de shortcut is niet opgeslagen.")
+                self.status_label.configure(style="StatusDirty.TLabel")
+            else:
+                self.set_status("Instellingen zijn opgeslagen.", dirty_style=False)
             self.select_page("dictate")
             messagebox.showerror(self.controller.app_name, str(exc), parent=self)
             return

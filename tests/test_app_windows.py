@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import queue
 import tempfile
 import threading
 import unittest
@@ -320,6 +321,119 @@ class WindowsAppTests(unittest.TestCase):
             self.assertEqual(client.audio.transcriptions.create.call_count, 1)
         finally:
             path.unlink(missing_ok=True)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows integration test")
+class WindowsAudioIndicatorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        global app, np
+        import app
+        import numpy as np
+
+    def setUp(self) -> None:
+        self.engine = app.DictationEngine.__new__(app.DictationEngine)
+        self.engine.state = "recording"
+        self.engine.audio_queue = queue.SimpleQueue()
+        self.engine.audio_warning = None
+        self.engine.audio_level_reading = (0.0, 0.0)
+
+    def feed_audio(self, amplitude: int, channels: int = 1) -> "np.ndarray":
+        samples = np.full((160, channels), amplitude, dtype=np.int16)
+        self.engine.audio_callback(samples, len(samples), None, None)
+        return samples
+
+    def make_bubble(self):
+        bubble = app.StatusBubble.__new__(app.StatusBubble)
+        bubble.root = mock.Mock()
+        bubble.canvas = mock.Mock()
+        bubble.state = "recording"
+        bubble.wave_after_id = None
+        bubble.wave_levels = [0.0] * 7
+        bubble.audio_level_provider = self.engine.get_audio_level
+        bubble.draw_glass_pill = mock.Mock()
+        bubble.draw_round_rect = mock.Mock()
+        bubble.draw_round_rect_outline = mock.Mock()
+        return bubble
+
+    def heights(self, bubble) -> list[float]:
+        return [call.args[3] - call.args[1] for call in bubble.canvas.create_line.call_args_list[-7:]]
+
+    def tick(self, bubble) -> None:
+        bubble.root.after.call_args.args[1]()
+
+    def test_silence_and_low_noise_do_not_show_audio_activity(self) -> None:
+        for amplitude in (0, 20, -80):
+            with self.subTest(amplitude=amplitude):
+                self.feed_audio(amplitude)
+                self.assertEqual(self.engine.get_audio_level(), 0.0)
+        self.engine.audio_callback(np.empty((0, 1), dtype=np.int16), 0, None, None)
+        self.assertEqual(self.engine.get_audio_level(), 0.0)
+
+    def test_louder_audio_increases_the_level_without_overflow(self) -> None:
+        levels = []
+        for amplitude in (300, -3000, -32768):
+            self.feed_audio(amplitude, channels=2)
+            levels.append(self.engine.get_audio_level())
+        self.assertGreater(levels[0], 0.0)
+        self.assertLess(levels[0], levels[1])
+        self.assertLess(levels[1], levels[2])
+        self.assertEqual(levels[2], 1.0)
+
+    def test_meter_preserves_the_recorded_samples_and_audio_warning(self) -> None:
+        samples = np.array([[12000, -32768], [0, 32767]], dtype=np.int16)
+        expected = samples.copy()
+        self.engine.audio_callback(samples, len(samples), None, "input overflow")
+        samples.fill(0)
+        np.testing.assert_array_equal(self.engine.audio_queue.get_nowait(), expected)
+        self.assertEqual(self.engine.audio_warning, "input overflow")
+
+    def test_missing_audio_and_inactive_recording_clear_the_level(self) -> None:
+        with mock.patch.object(app.time, "monotonic", return_value=10.0):
+            self.feed_audio(3000)
+            self.assertGreater(self.engine.get_audio_level(), 0.0)
+            for state in ("processing", "idle"):
+                self.engine.state = state
+                self.assertEqual(self.engine.get_audio_level(), 0.0)
+        self.engine.state = "recording"
+        with mock.patch.object(app.time, "monotonic", return_value=11.0):
+            self.assertEqual(self.engine.get_audio_level(), 0.0)
+
+    def test_bars_follow_audio_and_freeze_at_silence_while_timer_continues(self) -> None:
+        bubble = self.make_bubble()
+        with (
+            mock.patch.object(app.time, "monotonic", return_value=10.0),
+            mock.patch.object(app.time, "perf_counter", return_value=100.0) as clock,
+        ):
+            self.feed_audio(0)
+            bubble.start_wave()
+            silent_heights = self.heights(bubble)
+            clock.return_value = 101.0
+            self.tick(bubble)
+            self.assertEqual(self.heights(bubble), silent_heights)
+            self.assertEqual(bubble.canvas.create_text.call_args.kwargs["text"], "00:01")
+
+            self.feed_audio(300)
+            self.tick(bubble)
+            quiet_heights = self.heights(bubble)
+            self.assertGreater(max(quiet_heights), max(silent_heights))
+            self.feed_audio(3000)
+            self.tick(bubble)
+            self.assertGreater(max(self.heights(bubble)), max(quiet_heights))
+
+            self.feed_audio(0)
+            self.tick(bubble)
+            self.assertEqual(self.heights(bubble), silent_heights)
+            self.tick(bubble)
+            self.assertEqual(self.heights(bubble), silent_heights)
+
+            self.feed_audio(3000)
+            self.tick(bubble)
+            clock.return_value = 102.0
+            with mock.patch.object(app.time, "monotonic", return_value=11.0):
+                self.tick(bubble)
+            self.assertEqual(self.heights(bubble), silent_heights)
+            self.assertEqual(bubble.canvas.create_text.call_args.kwargs["text"], "00:02")
 
 
 if __name__ == "__main__":

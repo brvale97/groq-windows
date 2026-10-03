@@ -16,7 +16,7 @@ import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.21"
+APP_VERSION = "0.1.22"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -75,6 +75,9 @@ _INSTANCE_LOCK_FILE = None
 MIN_TRANSCRIPTION_SECONDS = 1.0
 MIN_TRANSCRIPTION_BYTES = 32_000
 POST_STOP_RECORDING_SECONDS = 0.15
+AUDIO_LEVEL_NOISE_FLOOR = 0.003
+AUDIO_LEVEL_FULL_SCALE = 0.25
+AUDIO_LEVEL_TIMEOUT_SECONDS = 0.25
 _SOUNDS_READY = False
 _SOUNDS_LOCK = threading.Lock()
 BUBBLE_COLORS = {
@@ -181,6 +184,43 @@ def acquire_single_instance_lock() -> bool:
         return False
 
     return True
+
+
+def release_single_instance_lock() -> None:
+    """Hand the single-instance claim back so a successor can take it."""
+    global _INSTANCE_MUTEX_HANDLE, _INSTANCE_LOCK_FILE
+
+    if os.name != "nt":
+        return
+
+    import ctypes
+    import ctypes.wintypes
+    import msvcrt
+
+    if _INSTANCE_MUTEX_HANDLE is not None:
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.ReleaseMutex.argtypes = [ctypes.wintypes.HANDLE]
+            kernel32.ReleaseMutex.restype = ctypes.wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+            kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+            kernel32.ReleaseMutex(_INSTANCE_MUTEX_HANDLE)
+            kernel32.CloseHandle(_INSTANCE_MUTEX_HANDLE)
+        except Exception as exc:
+            logging.warning("Could not release single-instance mutex: %s", exc)
+        _INSTANCE_MUTEX_HANDLE = None
+
+    if _INSTANCE_LOCK_FILE is not None:
+        try:
+            _INSTANCE_LOCK_FILE.seek(0)
+            msvcrt.locking(_INSTANCE_LOCK_FILE.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception as exc:
+            logging.warning("Could not unlock single-instance file: %s", exc)
+        try:
+            _INSTANCE_LOCK_FILE.close()
+        except Exception:
+            pass
+        _INSTANCE_LOCK_FILE = None
 
 
 @dataclass
@@ -350,6 +390,46 @@ def save_config(config: Config, *, allow_keyring_mutation: bool | None = None) -
             temp_path.unlink(missing_ok=True)
 
 
+# Prefixes that are swapped for an environment variable so generated scripts
+# stay ASCII even when the Windows user name contains accented characters.
+ENV_PATH_VARIABLES = ("LOCALAPPDATA", "APPDATA", "USERPROFILE")
+
+
+def path_with_env_var(path: Path | str, style: str = "cmd") -> str:
+    """Render *path* with a %VAR% / $Env:VAR prefix when one applies."""
+    text = str(path)
+    for name in ENV_PATH_VARIABLES:
+        base = (os.getenv(name) or "").rstrip("\\/")
+        if not base or len(text) <= len(base):
+            continue
+        if text[: len(base)].lower() != base.lower() or text[len(base)] not in "\\/":
+            continue
+        remainder = text[len(base) :]
+        return f"$Env:{name}{remainder}" if style == "powershell" else f"%{name}%{remainder}"
+    return text
+
+
+def cmd_script_encoding() -> str:
+    """cmd.exe reads batch files in the console OEM code page, not in UTF-8."""
+    if os.name != "nt":
+        return "utf-8"
+    try:
+        import ctypes
+
+        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    except Exception:
+        return "mbcs"
+
+
+def cmd_script_bytes(lines: list[str]) -> bytes:
+    text = "\r\n".join(lines)
+    try:
+        return text.encode(cmd_script_encoding())
+    except (LookupError, UnicodeEncodeError):
+        # Better a path cmd.exe may mangle than no script at all.
+        return text.encode("utf-8", errors="replace")
+
+
 def startup_cmd_path() -> Path:
     return (
         Path(os.getenv("APPDATA", str(Path.home())))
@@ -364,18 +444,18 @@ def startup_cmd_path() -> Path:
 
 def current_launch_command() -> str:
     if getattr(sys, "frozen", False):
-        return f'start "" "{sys.executable}"'
+        return f'start "" "{path_with_env_var(sys.executable)}"'
 
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     launcher = pythonw if pythonw.exists() else Path(sys.executable)
-    return f'start "" "{launcher}" "{Path(__file__).resolve()}"'
+    return f'start "" "{path_with_env_var(launcher)}" "{path_with_env_var(Path(__file__).resolve())}"'
 
 
 def set_autostart(enabled: bool) -> None:
     path = startup_cmd_path()
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = f"@echo off\r\n{current_launch_command()}\r\n".encode("utf-8")
+        content = cmd_script_bytes(["@echo off", current_launch_command(), ""])
         if not path.exists() or path.read_bytes() != content:
             path.write_bytes(content)
     else:
@@ -527,18 +607,19 @@ def launch_update_script(downloaded_exe: Path) -> None:
                 "",
             ]
         ),
-        encoding="utf-8",
+        # Windows PowerShell 5.1 reads a BOM-less file as ANSI, which corrupts
+        # non-ASCII paths; the BOM makes it decode the script as UTF-8.
+        encoding="utf-8-sig",
     )
-    cmd_script.write_text(
-        "\r\n".join(
+    cmd_script.write_bytes(
+        cmd_script_bytes(
             [
                 "@echo off",
-                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{ps_script}"',
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{path_with_env_var(ps_script)}"',
                 'del "%~f0" >nul 2>nul',
                 "",
             ]
-        ),
-        encoding="ascii",
+        )
     )
 
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -684,7 +765,8 @@ class StatusBubble:
         self.spinner_after_id = None
         self.spinner_angle = 0
         self.wave_after_id = None
-        self.wave_phase = 0
+        self.wave_levels = [0.0] * 7
+        self.audio_level_provider = lambda: 0.0
         self.recording_started_at = 0.0
         self.window = Toplevel(root)
         self.window.withdraw()
@@ -783,14 +865,19 @@ class StatusBubble:
     def start_wave(self) -> None:
         self.stop_wave()
         self.recording_started_at = time.perf_counter()
+        self.wave_levels = [0.0] * 7
 
         def tick() -> None:
             if self.state != "recording":
                 self.wave_after_id = None
                 return
-            self.wave_phase = (self.wave_phase + 1) % 1000
+            level = self.audio_level_provider()
+            if level > 0:
+                self.wave_levels = self.wave_levels[1:] + [level]
+            else:
+                self.wave_levels = [0.0] * 7
             self.draw_recording_pill()
-            self.wave_after_id = self.root.after(120, tick)
+            self.wave_after_id = self.root.after(50, tick)
 
         tick()
 
@@ -823,7 +910,6 @@ class StatusBubble:
             "processing": "Transcriptie",
         }
         if state == "recording":
-            self.draw_recording_pill()
             self.start_wave()
         elif state == "processing":
             self.draw_processing_button()
@@ -833,8 +919,6 @@ class StatusBubble:
         tooltip = tooltips.get(state, tooltips["idle"])
         self.window.title(f"{APP_NAME} - {tooltip}")
         self.position()
-        if state == "idle" and schedule_hide:
-            self.schedule_hide()
 
     def show_notice(self, message: str) -> None:
         self.stop_spinner()
@@ -893,10 +977,8 @@ class StatusBubble:
     def draw_recording_pill(self) -> None:
         self.canvas.delete("all")
         self.draw_glass_pill()
-        for index in range(7):
-            phase = (self.wave_phase + index * 2) % 12
-            distance = abs(phase - 6)
-            height = 8 + (6 - distance) * 2
+        for index, level in enumerate(self.wave_levels):
+            height = 4 + level * 18
             x = 18 + index * 5
             y_mid = 24
             self.canvas.create_line(
@@ -1059,10 +1141,13 @@ class DictationEngine:
         self.status_callback = status_callback or (lambda message: None)
         self.state_callback = state_callback or (lambda state: None)
         self.transcript_callback = transcript_callback or (lambda text: None)
-        self.input_device = resolve_input_device(config.input_device)
+        self.input_device: int | None = None
+        self.input_device_error: str | None = None
+        self._resolve_device(config)
         self.client = Groq(api_key=config.api_key) if config.api_key else None
         self.audio_queue: queue.SimpleQueue = queue.SimpleQueue()
         self.audio_warning: str | None = None
+        self.audio_level_reading = (0.0, 0.0)
         self.stream: sd.InputStream | None = None
         self.active_session: RecordingSession | None = None
         self.state = "idle"
@@ -1072,10 +1157,20 @@ class DictationEngine:
         pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0
 
+    def _resolve_device(self, config: Config) -> None:
+        """Never let a vanished microphone block startup; report it when recording."""
+        try:
+            self.input_device = resolve_input_device(config.input_device)
+            self.input_device_error = None
+        except Exception as exc:
+            self.input_device = None
+            self.input_device_error = str(exc)
+            logging.warning("Could not resolve input device: %s", exc)
+
     def update_config(self, config: Config) -> None:
         with self.lock:
             self.config = config
-            self.input_device = resolve_input_device(config.input_device)
+            self._resolve_device(config)
             self.client = Groq(api_key=config.api_key) if config.api_key else None
 
     def notify(self, message: str) -> None:
@@ -1121,6 +1216,10 @@ class DictationEngine:
             if self.state != "idle":
                 return
             config = self.config
+            if self.input_device_error:
+                self.notify(f"{self.input_device_error} Kies een andere microfoon in Instellingen.")
+                play_sound("error.wav")
+                return
             if not config.api_key or self.client is None:
                 session = None
             else:
@@ -1145,6 +1244,7 @@ class DictationEngine:
             self.active_session = session
             self.audio_queue = queue.SimpleQueue()
             self.audio_warning = None
+            self.audio_level_reading = (0.0, 0.0)
 
         stream: sd.InputStream | None = None
         try:
@@ -1223,6 +1323,25 @@ class DictationEngine:
         if status:
             self.audio_warning = str(status)
         self.audio_queue.put(indata.copy())
+        # The stream supplies int16 PCM. Cast before squaring to avoid overflow.
+        values = np.asarray(indata, dtype=np.float32)
+        rms = math.sqrt(float(np.mean(np.square(values)))) / 32768.0 if values.size else 0.0
+        level = 0.0
+        if rms > AUDIO_LEVEL_NOISE_FLOOR:
+            level = min(
+                1.0,
+                math.log(rms / AUDIO_LEVEL_NOISE_FLOOR)
+                / math.log(AUDIO_LEVEL_FULL_SCALE / AUDIO_LEVEL_NOISE_FLOOR),
+            )
+        # Publish one snapshot; the Tk timer reads it without queuing UI work
+        # from PortAudio's callback thread.
+        self.audio_level_reading = (level, time.monotonic())
+
+    def get_audio_level(self) -> float:
+        level, updated_at = self.audio_level_reading
+        if self.state != "recording" or time.monotonic() - updated_at > AUDIO_LEVEL_TIMEOUT_SECONDS:
+            return 0.0
+        return level
 
     def write_wav_and_stats(
         self,
@@ -1412,6 +1531,7 @@ class TrayApp:
             self.bubble = StatusBubble(self.root, self.on_bubble_click)
             self.history = TranscriptionHistory(HISTORY_PATH)
             self.engine = DictationEngine(self.config, self.set_status, self.set_engine_state, self.on_transcript)
+            self.bubble.audio_level_provider = self.engine.get_audio_level
             self.hotkeys = HotkeyListener(self.engine.on_shortcut)
             self.hotkey_error: str | None = None
             self.settings_window: SettingsWindow | None = None
@@ -1492,6 +1612,10 @@ class TrayApp:
 
     def apply_settings(self, new_config: Config) -> None:
         previous = self.config
+        if new_config.input_device != previous.input_device:
+            # Validate before writing, so a device that cannot be resolved is
+            # never stored while the user is told saving failed.
+            resolve_input_device(new_config.input_device)
         save_config(new_config)
         set_autostart(new_config.autostart)
         self.engine.update_config(new_config)
@@ -1744,6 +1868,12 @@ class TrayApp:
         env = os.environ.copy()
         env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # Hand over what only one process can own before the successor starts:
+        # it checks the single-instance claim right away (and would otherwise
+        # exit silently) and registers the same global shortcut.
+        self.remove_hotkey()
+        self.hotkeys.stop()
+        release_single_instance_lock()
         try:
             if getattr(sys, "frozen", False):
                 executable = Path(sys.executable)
@@ -1753,6 +1883,11 @@ class TrayApp:
                 launcher = pythonw if pythonw.exists() else Path(sys.executable)
                 subprocess.Popen([str(launcher), str(Path(__file__).resolve())], cwd=str(Path(__file__).parent), env=env, creationflags=creation_flags)
         except Exception as exc:
+            acquire_single_instance_lock()
+            try:
+                self.install_hotkey()
+            except Exception as hotkey_exc:
+                logging.warning("Could not restore hotkey after a failed restart: %s", hotkey_exc)
             messagebox.showerror(APP_NAME, f"App kon niet worden herstart:\n{exc}")
             return
 

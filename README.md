@@ -15,6 +15,7 @@ A small dictation app for Windows:
 - Explicit word replacements can correct known variants such as `Grok` or `Grog` to `Groq` after transcription.
 - The app checks GitHub Releases for updates and can update itself without deleting your API key or settings.
 - A small status icon appears centered at the bottom of the screen while the app is in use: recording, transcribing, and then ready for another 3 seconds.
+- The recording bars follow the microphone volume and stay still during silence or when no fresh audio arrives; the timer keeps counting.
 
 ## Setup
 
