@@ -16,7 +16,7 @@ import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.23"
+APP_VERSION = "0.1.24"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -735,6 +735,18 @@ def play_sound(name: str) -> None:
         winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
     except RuntimeError as exc:
         logging.warning("Could not play sound %s: %s", name, exc)
+
+
+def play_audio_file(path: Path) -> None:
+    """Play a WAV asynchronously; any cue or other WAV interrupts it."""
+    if winsound is None:
+        raise RuntimeError("Afspelen werkt alleen op Windows.")
+    winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+
+
+def stop_audio() -> None:
+    if winsound is not None:
+        winsound.PlaySound(None, 0)
 
 
 def resolve_input_device(input_device: str) -> int | None:
@@ -1757,6 +1769,14 @@ class TrayApp:
     def retry_recording(self, recording_id: str) -> None:
         self.engine.retry_recording(recording_id)
 
+    def play_recording(self, recording_id: str) -> float:
+        entry = self.recordings.get(recording_id)
+        play_audio_file(self.recordings.audio_path(entry))
+        return entry.duration
+
+    def stop_playback(self) -> None:
+        stop_audio()
+
     def copy_text(self, text: str) -> None:
         pyperclip.copy(text)
 
@@ -1764,6 +1784,7 @@ class TrayApp:
         with self.engine.lock:
             if self.engine.state != "idle":
                 raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
+            stop_audio()
             self.recordings.clear()
             self.history.clear()
 

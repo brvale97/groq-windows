@@ -48,6 +48,13 @@ class FakeController:
         self.retried = recording_id
         self.busy = True
 
+    def play_recording(self, recording_id):
+        self.played = [*getattr(self, "played", []), recording_id]
+        return 0.1
+
+    def stop_playback(self):
+        self.stopped = getattr(self, "stopped", 0) + 1
+
     def copy_text(self, text):
         self.copied = text
 
@@ -196,6 +203,41 @@ class SettingsWindowTests(unittest.TestCase):
             self.assertEqual(controller.retried, 'a' * 32)
             self.assertIn('disabled', self.button(app_module, window, 'Opnieuw transcriberen').state())
             self.assertIn('disabled', window.clear_history_button.state())
+            self.assertFalse(window.dirty)
+        finally:
+            root.destroy()
+
+    def test_recording_playback_toggles_and_resets_after_audio_ends(self):
+        import app
+        from history import RecordingEntry
+
+        app_module, root, controller, window = self.open_window(app.Config(api_key='test-only'))
+        try:
+            controller.recordings = [
+                RecordingEntry(text='Hallo', created_at=2_000_000_000.0, id='a' * 32, duration=0.1, status='done'),
+                RecordingEntry(text='', created_at=1_900_000_000.0, id='b' * 32, duration=0.1, status='failed'),
+            ]
+            window.refresh_history()
+            window.select_page('history')
+            root.update()
+            play_buttons = [w for w in self.descendants(window) if isinstance(w, app_module.ttk.Button) and w.cget('text') == 'Afspelen']
+            self.assertEqual(len(play_buttons), 2)
+            play_buttons[0].invoke()
+            self.assertEqual(controller.played, ['a' * 32])
+            self.assertEqual(play_buttons[0].cget('text'), 'Stoppen')
+            play_buttons[1].invoke()
+            self.assertEqual(controller.played, ['a' * 32, 'b' * 32])
+            self.assertEqual(play_buttons[0].cget('text'), 'Afspelen')
+            self.assertEqual(play_buttons[1].cget('text'), 'Stoppen')
+            play_buttons[1].invoke()
+            self.assertEqual(play_buttons[1].cget('text'), 'Afspelen')
+            self.assertEqual(controller.stopped, 2)
+            play_buttons[0].invoke()
+            deadline = time.monotonic() + 2
+            while play_buttons[0].cget('text') == 'Stoppen' and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.02)
+            self.assertEqual(play_buttons[0].cget('text'), 'Afspelen')
             self.assertFalse(window.dirty)
         finally:
             root.destroy()

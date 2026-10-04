@@ -322,6 +322,29 @@ class WindowsAppTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_saved_recording_plays_from_history_and_can_be_stopped(self) -> None:
+        from history import RecordingHistory
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.wav"
+            with wave.open(str(source), "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(b"\0\0" * 8000)
+            tray_app = app.TrayApp.__new__(app.TrayApp)
+            tray_app.recordings = RecordingHistory(Path(directory) / "recordings")
+            entry = tray_app.recordings.add(source)
+            with mock.patch.object(app.winsound, "PlaySound") as play:
+                self.assertAlmostEqual(tray_app.play_recording(entry.id), 0.5)
+                tray_app.stop_playback()
+            path, flags = play.call_args_list[0].args
+            self.assertEqual(Path(path), tray_app.recordings.audio_path(entry))
+            self.assertTrue(flags & app.winsound.SND_ASYNC)
+            self.assertEqual(play.call_args_list[1].args, (None, 0))
+            with self.assertRaises(RuntimeError):
+                tray_app.play_recording("c" * 32)
+
 
 @unittest.skipUnless(os.name == "nt", "Windows integration test")
 class WindowsAudioIndicatorTests(unittest.TestCase):

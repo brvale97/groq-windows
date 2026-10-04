@@ -252,6 +252,8 @@ class SettingsController(Protocol):
     def recording_entries(self) -> tuple[RecordingEntry, ...]: ...
     def recording_busy(self) -> bool: ...
     def retry_recording(self, recording_id: str) -> None: ...
+    def play_recording(self, recording_id: str) -> float: ...
+    def stop_playback(self) -> None: ...
     def copy_text(self, text: str) -> None: ...
     def clear_history(self) -> None: ...
     def test_sounds(self) -> None: ...
@@ -483,6 +485,9 @@ class SettingsWindow(Toplevel):
         self.capturing = False
         self.capture_bind_id: str | None = None
         self.api_key_visible = False
+        self.playing_recording_id: str | None = None
+        self.playback_after_id: str | None = None
+        self.play_buttons: dict[str, ttk.Button] = {}
 
         # State that is edited by the pages and read back by save().
         self.api_key = StringVar(value=config.api_key)
@@ -690,6 +695,9 @@ class SettingsWindow(Toplevel):
     def refresh_recordings(self, entries: tuple[RecordingEntry, ...], busy: bool) -> None:
         for child in self.recording_host.winfo_children():
             child.destroy()
+        self.play_buttons = {}
+        if self.playing_recording_id not in {entry.id for entry in entries}:
+            self.stop_recording_playback()
         if not entries:
             empty = Card(
                 self.recording_host, "Nog geen opnames",
@@ -703,25 +711,70 @@ class SettingsWindow(Toplevel):
             row.grid(row=index, column=0, sticky="ew", pady=(0 if index == 0 else 8, 0))
             row.columnconfigure(0, weight=1)
             ttk.Label(row, text=f"{entry.label()} · {entry.duration:.1f} s", style="CardMuted.TLabel").grid(row=0, column=0, sticky="w")
+            play = ttk.Button(
+                row, text="Stoppen" if entry.id == self.playing_recording_id else "Afspelen", style="Ghost.TButton",
+                command=lambda e=entry: self.toggle_recording_playback(e),
+            )
+            play.grid(row=0, column=1, sticky="e", padx=(8, 0))
+            self.play_buttons[entry.id] = play
             retry = ttk.Button(
                 row, text="Opnieuw transcriberen", style="Ghost.TButton",
                 command=lambda e=entry: self.retry_recording(e),
             )
-            retry.grid(row=0, column=1, sticky="e", padx=(8, 0))
+            retry.grid(row=0, column=2, sticky="e", padx=(8, 0))
             retry.state(["disabled"] if busy else ["!disabled"])
             ttk.Label(row, text=labels[entry.status], style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
             if entry.text:
                 copy = ttk.Button(row, text="Kopiëren", style="Ghost.TButton")
                 copy.configure(command=lambda e=entry, b=copy: self.copy_history_entry(e, b))
-                copy.grid(row=1, column=1, sticky="e", pady=(4, 0))
+                copy.grid(row=1, column=2, sticky="e", pady=(4, 0))
                 text = bordered_text(row, height=2)
                 text.insert("1.0", entry.text)
                 text.configure(state="disabled", cursor="arrow")
-                text.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+                text.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
             if entry.error:
                 ttk.Label(
                     row, text=entry.error, style="CardMuted.TLabel", justify="left", wraplength=self.px(530),
-                ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+    def toggle_recording_playback(self, entry: RecordingEntry) -> None:
+        if entry.id == self.playing_recording_id:
+            self.stop_recording_playback()
+            return
+        self.stop_recording_playback()
+        try:
+            duration = self.controller.play_recording(entry.id)
+        except Exception as exc:
+            self.set_status(f"Afspelen mislukt: {exc}")
+            return
+        self.playing_recording_id = entry.id
+        self._set_play_button(entry.id, "Stoppen")
+        # Playback is fire-and-forget; reset the button once the audio has ended.
+        self.playback_after_id = self.after(max(250, int(duration * 1000) + 250), self._playback_finished)
+
+    def stop_recording_playback(self) -> None:
+        if self.playback_after_id is not None:
+            self.after_cancel(self.playback_after_id)
+            self.playback_after_id = None
+        if self.playing_recording_id is None:
+            return
+        self._set_play_button(self.playing_recording_id, "Afspelen")
+        self.playing_recording_id = None
+        try:
+            self.controller.stop_playback()
+        except Exception as exc:
+            self.set_status(f"Stoppen mislukt: {exc}")
+
+    def _playback_finished(self) -> None:
+        self.playback_after_id = None
+        if self.playing_recording_id is not None:
+            self._set_play_button(self.playing_recording_id, "Afspelen")
+            self.playing_recording_id = None
+
+    def _set_play_button(self, recording_id: str, text: str) -> None:
+        button = self.play_buttons.get(recording_id)
+        if button is not None and button.winfo_exists():
+            button.configure(text=text)
 
     def retry_recording(self, entry: RecordingEntry) -> None:
         try:
@@ -750,6 +803,7 @@ class SettingsWindow(Toplevel):
     def clear_history(self) -> None:
         if not messagebox.askyesno(self.controller.app_name, "Alle bewaarde opnames en transcripties verwijderen?", parent=self):
             return
+        self.stop_recording_playback()
         try:
             self.controller.clear_history()
         except Exception as exc:
@@ -1143,6 +1197,11 @@ class SettingsWindow(Toplevel):
 
         self.dirty = False
         self.destroy()
+
+    def destroy(self) -> None:
+        if self.playing_recording_id is not None:
+            self.stop_recording_playback()
+        super().destroy()
 
     def cancel(self) -> None:
         if self.capturing:
