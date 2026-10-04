@@ -15,7 +15,7 @@ A small dictation app for Windows:
 - Explicit word replacements can correct known variants such as `Grok` or `Grog` to `Groq` after transcription.
 - The app checks GitHub Releases for updates and can update itself without deleting your API key or settings.
 - A small status icon appears centered at the bottom of the screen while the app is in use: recording, transcribing, and then ready for another 3 seconds.
-- The recording bars follow the microphone volume and stay still during silence or when no fresh audio arrives; the timer keeps counting.
+- While recording, a subtle waveform scrolls from right to left like a dictaphone: bar heights follow your microphone volume, rise quickly when you speak and fade out gently when you stop. During silence it settles into small dots; the timer keeps counting.
 
 ## Setup
 
@@ -108,3 +108,22 @@ tray and shown on every window and in the taskbar instead of the default Tk feat
 The Windows widget tests require an interactive desktop. They verify navigation,
 visible control bounds, dictionary edits, saving, shortcut capture and cancelling
 without saving.
+
+## Voice recording recovery (0.1.23)
+
+<!-- Source: Bram's request, 2026-10-03. Scope: Groq Windows Dictation. Keep twenty recordings and allow transcription retries in the app. -->
+
+Geschiedenis also keeps the last **twenty voice recordings**, independently of
+the twenty transcripts. The **Opnames** tab stores the original audio locally in
+`%APPDATA%\GroqInsertDictation\recordings` before contacting Groq, including short
+recordings and failed or empty transcription responses. Recordings and their
+status survive app restarts. The oldest audio and its metadata are removed when
+the twenty-first recording is saved.
+
+Use **Opnieuw transcriberen** on a recording to try again with your currently
+saved API key, model, language, prompt, dictionary and replacements. The result
+is copied to the clipboard and added to **Teksten**; a retry keeps the original
+recording and does not automatically paste into the Settings window. You can
+retry while idle, including after correcting your connection or settings.
+**Geschiedenis wissen** removes both the saved audio and the transcripts.
+Recordings deleted by older app versions cannot be recovered.

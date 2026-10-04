@@ -38,11 +38,22 @@ class FakeController:
     def history_entries(self):
         return tuple(getattr(self, "history", ()))
 
+    def recording_entries(self):
+        return tuple(getattr(self, "recordings", ()))
+
+    def recording_busy(self):
+        return getattr(self, "busy", False)
+
+    def retry_recording(self, recording_id):
+        self.retried = recording_id
+        self.busy = True
+
     def copy_text(self, text):
         self.copied = text
 
     def clear_history(self):
         self.history = []
+        self.recordings = []
 
     def test_sounds(self):
         pass
@@ -152,6 +163,7 @@ class SettingsWindowTests(unittest.TestCase):
             controller.history = [HistoryEntry('Tweede tekst', 2_000_000_000.0), HistoryEntry('Eerste tekst', 1_900_000_000.0)]
             window.refresh_history()
             window.select_page('history')
+            window.history_tabs.select(window.history_scroller)
             root.update()
             copy_buttons = [w for w in self.descendants(window) if isinstance(w, app_module.ttk.Button) and w.cget('text') == 'Kopiëren']
             self.assertEqual(len(copy_buttons), 2)
@@ -159,6 +171,31 @@ class SettingsWindowTests(unittest.TestCase):
             root.update()
             self.assertEqual(controller.copied, 'Tweede tekst')
             self.assertEqual(copy_buttons[0].cget('text'), 'Gekopieerd ✓')
+            self.assertFalse(window.dirty)
+        finally:
+            root.destroy()
+
+    def test_saved_failed_audio_is_retryable_without_any_text_history(self):
+        import app
+        from history import RecordingEntry
+
+        app_module, root, controller, window = self.open_window(app.Config(api_key='test-only'))
+        try:
+            controller.recordings = [RecordingEntry(
+                text='', created_at=2_000_000_000.0, id='a' * 32, duration=3.0,
+                status='failed', error='Network unavailable',
+            )]
+            window.refresh_history()
+            window.select_page('history')
+            root.update()
+            retry = self.button(app_module, window, 'Opnieuw transcriberen')
+            self.assertTrue(retry.winfo_viewable())
+            self.assertNotIn('disabled', window.clear_history_button.state())
+            retry.invoke()
+            root.update()
+            self.assertEqual(controller.retried, 'a' * 32)
+            self.assertIn('disabled', self.button(app_module, window, 'Opnieuw transcriberen').state())
+            self.assertIn('disabled', window.clear_history_button.state())
             self.assertFalse(window.dirty)
         finally:
             root.destroy()

@@ -26,7 +26,7 @@ from dictation_core import (
     normalize_replacement_part,
     normalize_word_replacements,
 )
-from history import MAX_HISTORY_ENTRIES, HistoryEntry
+from history import MAX_HISTORY_ENTRIES, MAX_RECORDING_ENTRIES, HistoryEntry, RecordingEntry
 from hotkeys import HotkeyError, hotkey_from_tk_event, normalize_hotkey_text, validate_hotkey
 
 
@@ -249,6 +249,9 @@ class SettingsController(Protocol):
     def resume_hotkey(self) -> None: ...
     def test_api_key(self, api_key: str) -> str: ...
     def history_entries(self) -> tuple[HistoryEntry, ...]: ...
+    def recording_entries(self) -> tuple[RecordingEntry, ...]: ...
+    def recording_busy(self) -> bool: ...
+    def retry_recording(self, recording_id: str) -> None: ...
     def copy_text(self, text: str) -> None: ...
     def clear_history(self) -> None: ...
     def test_sounds(self) -> None: ...
@@ -447,7 +450,7 @@ class ScrollableFrame(ttk.Frame):
 class SettingsWindow(Toplevel):
     PAGES = (
         ("dictate", "Dicteren", "Jouw stem, direct op de juiste plek."),
-        ("history", "Geschiedenis", f"Je laatste {MAX_HISTORY_ENTRIES} transcripties, direct te kopiëren."),
+        ("history", "Geschiedenis", f"Je laatste {MAX_RECORDING_ENTRIES} opnames en {MAX_HISTORY_ENTRIES} transcripties."),
         ("recognition", "Herkenning", "Help Groq jouw taal en context beter te begrijpen."),
         ("dictionary", "Woordenboek", "Eigen namen, vaktermen en vaste correcties."),
         ("connection", "Verbinding", "Je Groq API key en het transcriptiemodel."),
@@ -631,8 +634,13 @@ class SettingsWindow(Toplevel):
 
     def _build_history_page(self, page: ttk.Frame) -> None:
         page.rowconfigure(0, weight=1)
-        self.history_scroller = ScrollableFrame(page, COLORS["content"])
-        self.history_scroller.grid(row=0, column=0, sticky="nsew")
+        self.history_tabs = ttk.Notebook(page)
+        self.history_tabs.grid(row=0, column=0, sticky="nsew")
+        self.recording_scroller = ScrollableFrame(self.history_tabs, COLORS["content"])
+        self.history_tabs.add(self.recording_scroller, text="Opnames")
+        self.recording_host = self.recording_scroller.inner
+        self.history_scroller = ScrollableFrame(self.history_tabs, COLORS["content"])
+        self.history_tabs.add(self.history_scroller, text="Teksten")
         self.history_host = self.history_scroller.inner
 
         footer = ttk.Frame(page)
@@ -640,7 +648,7 @@ class SettingsWindow(Toplevel):
         footer.columnconfigure(0, weight=1)
         ttk.Label(
             footer,
-            text="Alleen op deze pc bewaard, in de map met je instellingen. Oudere transcripties verdwijnen automatisch.",
+            text="Opnames blijven ook bij een fout bewaard. De oudste verdwijnen na 20 nieuwe opnames. Opnieuw proberen gebruikt je opgeslagen instellingen.",
             style="Muted.TLabel",
             wraplength=self.px(430),
             justify="left",
@@ -650,13 +658,16 @@ class SettingsWindow(Toplevel):
         self.refresh_history()
 
     def refresh_history(self) -> None:
-        """Rebuild the history list; called after every new transcription."""
+        """Refresh both lists after saving audio or changing a request's status."""
         if not self.winfo_exists():
             return
         for child in self.history_host.winfo_children():
             child.destroy()
         entries = self.controller.history_entries()
-        self.clear_history_button.state(["!disabled"] if entries else ["disabled"])
+        recordings = self.controller.recording_entries()
+        busy = self.controller.recording_busy()
+        self.clear_history_button.state(["!disabled"] if (entries or recordings) and not busy else ["disabled"])
+        self.refresh_recordings(recordings, busy)
         if not entries:
             empty = Card(self.history_host, "Nog geen transcripties", "Dicteer iets met je shortcut. De tekst verschijnt hier zodra hij is geplakt.")
             empty.grid(row=0, column=0, sticky="ew")
@@ -676,6 +687,51 @@ class SettingsWindow(Toplevel):
             text.configure(state="disabled", cursor="arrow")
             text.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
+    def refresh_recordings(self, entries: tuple[RecordingEntry, ...], busy: bool) -> None:
+        for child in self.recording_host.winfo_children():
+            child.destroy()
+        if not entries:
+            empty = Card(
+                self.recording_host, "Nog geen opnames",
+                "Nieuwe opnames worden hier bewaard, ook als de transcriptie mislukt.",
+            )
+            empty.grid(row=0, column=0, sticky="ew")
+            return
+        labels = {"saved": "Bewaard", "processing": "Transcriberen…", "done": "Getranscribeerd", "failed": "Mislukt"}
+        for index, entry in enumerate(entries):
+            row = ttk.Frame(self.recording_host, style="Card.TFrame", padding=(14, 10, 14, 12))
+            row.grid(row=index, column=0, sticky="ew", pady=(0 if index == 0 else 8, 0))
+            row.columnconfigure(0, weight=1)
+            ttk.Label(row, text=f"{entry.label()} · {entry.duration:.1f} s", style="CardMuted.TLabel").grid(row=0, column=0, sticky="w")
+            retry = ttk.Button(
+                row, text="Opnieuw transcriberen", style="Ghost.TButton",
+                command=lambda e=entry: self.retry_recording(e),
+            )
+            retry.grid(row=0, column=1, sticky="e", padx=(8, 0))
+            retry.state(["disabled"] if busy else ["!disabled"])
+            ttk.Label(row, text=labels[entry.status], style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+            if entry.text:
+                copy = ttk.Button(row, text="Kopiëren", style="Ghost.TButton")
+                copy.configure(command=lambda e=entry, b=copy: self.copy_history_entry(e, b))
+                copy.grid(row=1, column=1, sticky="e", pady=(4, 0))
+                text = bordered_text(row, height=2)
+                text.insert("1.0", entry.text)
+                text.configure(state="disabled", cursor="arrow")
+                text.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            if entry.error:
+                ttk.Label(
+                    row, text=entry.error, style="CardMuted.TLabel", justify="left", wraplength=self.px(530),
+                ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    def retry_recording(self, entry: RecordingEntry) -> None:
+        try:
+            self.controller.retry_recording(entry.id)
+        except Exception as exc:
+            self.set_status(f"Opnieuw proberen mislukt: {exc}")
+            return
+        self.refresh_history()
+        self.set_status("Opnieuw transcriberen… De tekst komt op je klembord en in Geschiedenis.")
+
     def copy_history_entry(self, entry: HistoryEntry, button: ttk.Button) -> None:
         try:
             self.controller.copy_text(entry.text)
@@ -692,9 +748,14 @@ class SettingsWindow(Toplevel):
         self.after(1500, restore)
 
     def clear_history(self) -> None:
-        if not messagebox.askyesno(self.controller.app_name, "Alle bewaarde transcripties verwijderen?", parent=self):
+        if not messagebox.askyesno(self.controller.app_name, "Alle bewaarde opnames en transcripties verwijderen?", parent=self):
             return
-        self.controller.clear_history()
+        try:
+            self.controller.clear_history()
+        except Exception as exc:
+            self.set_status(f"Geschiedenis wissen mislukt: {exc}")
+            self.refresh_history()
+            return
         self.refresh_history()
         self.set_status("Geschiedenis gewist.")
 

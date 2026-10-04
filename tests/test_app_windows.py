@@ -337,6 +337,7 @@ class WindowsAudioIndicatorTests(unittest.TestCase):
         self.engine.audio_queue = queue.SimpleQueue()
         self.engine.audio_warning = None
         self.engine.audio_level_reading = (0.0, 0.0)
+        self.engine.audio_level_peak = 0.0
 
     def feed_audio(self, amplitude: int, channels: int = 1) -> "np.ndarray":
         samples = np.full((160, channels), amplitude, dtype=np.int16)
@@ -349,7 +350,8 @@ class WindowsAudioIndicatorTests(unittest.TestCase):
         bubble.canvas = mock.Mock()
         bubble.state = "recording"
         bubble.wave_after_id = None
-        bubble.wave_levels = [0.0] * 7
+        bubble.wave_levels = [0.0] * app.WAVE_BAR_COUNT
+        bubble.wave_envelope = 0.0
         bubble.audio_level_provider = self.engine.get_audio_level
         bubble.draw_glass_pill = mock.Mock()
         bubble.draw_round_rect = mock.Mock()
@@ -357,7 +359,7 @@ class WindowsAudioIndicatorTests(unittest.TestCase):
         return bubble
 
     def heights(self, bubble) -> list[float]:
-        return [call.args[3] - call.args[1] for call in bubble.canvas.create_line.call_args_list[-7:]]
+        return [call.args[3] - call.args[1] for call in bubble.canvas.create_line.call_args_list[-app.WAVE_BAR_COUNT:]]
 
     def tick(self, bubble) -> None:
         bubble.root.after.call_args.args[1]()
@@ -399,7 +401,31 @@ class WindowsAudioIndicatorTests(unittest.TestCase):
         with mock.patch.object(app.time, "monotonic", return_value=11.0):
             self.assertEqual(self.engine.get_audio_level(), 0.0)
 
-    def test_bars_follow_audio_and_freeze_at_silence_while_timer_continues(self) -> None:
+    def test_short_peaks_between_ui_ticks_are_kept(self) -> None:
+        with mock.patch.object(app.time, "monotonic", return_value=10.0):
+            self.feed_audio(3000)
+            loud = self.engine.get_audio_level()
+            self.feed_audio(3000)
+            self.feed_audio(0)
+            self.assertEqual(self.engine.get_audio_level(), loud)
+            self.assertEqual(self.engine.get_audio_level(), 0.0)
+            self.feed_audio(300)
+            quiet = self.engine.get_audio_level()
+            # No new audio block yet: hold the latest level instead of dropping to silence.
+            self.assertEqual(self.engine.get_audio_level(), quiet)
+
+    def test_level_rises_quickly_and_falls_back_gradually(self) -> None:
+        level = app.smooth_audio_level(0.0, 1.0)
+        self.assertGreaterEqual(level, 0.6)
+        tail = []
+        for _ in range(20):
+            level = app.smooth_audio_level(level, 0.0)
+            tail.append(level)
+        self.assertGreater(tail[0], 0.3)
+        self.assertTrue(all(a >= b for a, b in zip(tail, tail[1:])))
+        self.assertEqual(tail[-1], 0.0)
+
+    def test_waveform_scrolls_with_speech_and_settles_after_silence(self) -> None:
         bubble = self.make_bubble()
         with (
             mock.patch.object(app.time, "monotonic", return_value=10.0),
@@ -408,6 +434,7 @@ class WindowsAudioIndicatorTests(unittest.TestCase):
             self.feed_audio(0)
             bubble.start_wave()
             silent_heights = self.heights(bubble)
+            self.assertEqual(len(set(silent_heights)), 1)
             clock.return_value = 101.0
             self.tick(bubble)
             self.assertEqual(self.heights(bubble), silent_heights)
@@ -416,25 +443,41 @@ class WindowsAudioIndicatorTests(unittest.TestCase):
             self.feed_audio(300)
             self.tick(bubble)
             quiet_heights = self.heights(bubble)
-            self.assertGreater(max(quiet_heights), max(silent_heights))
+            self.assertGreater(quiet_heights[-1], silent_heights[-1])
             self.feed_audio(3000)
             self.tick(bubble)
-            self.assertGreater(max(self.heights(bubble)), max(quiet_heights))
+            loud_heights = self.heights(bubble)
+            self.assertGreater(loud_heights[-1], quiet_heights[-1])
+            # Earlier speech scrolls left instead of disappearing.
+            self.assertEqual(loud_heights[-2], quiet_heights[-1])
 
+            # After speech stops the newest bar falls back softly, not at once.
             self.feed_audio(0)
             self.tick(bubble)
-            self.assertEqual(self.heights(bubble), silent_heights)
-            self.tick(bubble)
+            tail_heights = self.heights(bubble)
+            self.assertGreater(tail_heights[-1], silent_heights[-1])
+            self.assertLess(tail_heights[-1], loud_heights[-1])
+            for _ in range(app.WAVE_BAR_COUNT + 15):
+                self.tick(bubble)
             self.assertEqual(self.heights(bubble), silent_heights)
 
             self.feed_audio(3000)
             self.tick(bubble)
             clock.return_value = 102.0
+            # Stale audio counts as silence; the timer keeps counting.
             with mock.patch.object(app.time, "monotonic", return_value=11.0):
-                self.tick(bubble)
+                for _ in range(app.WAVE_BAR_COUNT + 15):
+                    self.tick(bubble)
             self.assertEqual(self.heights(bubble), silent_heights)
             self.assertEqual(bubble.canvas.create_text.call_args.kwargs["text"], "00:02")
 
+    def test_oldest_bars_fade_into_the_pill(self) -> None:
+        bubble = self.make_bubble()
+        bubble.start_wave()
+        colors = [call.kwargs["fill"] for call in bubble.canvas.create_line.call_args_list[-app.WAVE_BAR_COUNT:]]
+        self.assertEqual(colors[-1], "#d92c3a")
+        self.assertNotEqual(colors[0], colors[-1])
+        self.assertEqual(app.blend_hex("#d92c3a", "#fff6f7", 0.0), "#fff6f7")
 
 if __name__ == "__main__":
     unittest.main()

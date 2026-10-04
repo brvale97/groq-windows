@@ -16,7 +16,7 @@ import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.22"
+APP_VERSION = "0.1.23"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -47,7 +47,7 @@ from dictation_core import (
     normalize_word_replacements,
 )
 from branding import draw_icon, write_icon
-from history import HistoryEntry, TranscriptionHistory
+from history import HistoryEntry, RecordingEntry, RecordingHistory, TranscriptionHistory
 from hotkeys import (  # noqa: F401 - re-exported for tests and tooling
     HotkeyError,
     HotkeyListener,
@@ -78,6 +78,13 @@ POST_STOP_RECORDING_SECONDS = 0.15
 AUDIO_LEVEL_NOISE_FLOOR = 0.003
 AUDIO_LEVEL_FULL_SCALE = 0.25
 AUDIO_LEVEL_TIMEOUT_SECONDS = 0.25
+# Dictaphone-style waveform: each tick adds one bar on the right and older bars
+# scroll left, so the last ~0.7 s of speech stays visible.
+WAVE_BAR_COUNT = 11
+WAVE_TICK_MS = 60
+WAVE_ATTACK = 0.7  # Fraction of a rise shown per tick: speech appears almost immediately.
+WAVE_RELEASE = 0.6  # Per-tick decay after speech, a soft tail of roughly 0.2 s.
+WAVE_FADED_BARS = 4  # The oldest bars fade into the pill background.
 _SOUNDS_READY = False
 _SOUNDS_LOCK = threading.Lock()
 BUBBLE_COLORS = {
@@ -118,6 +125,7 @@ def bottom_centered_window_geometry(
 APP_DIR = app_data_dir()
 SETTINGS_PATH = APP_DIR / "settings.json"
 HISTORY_PATH = APP_DIR / "history.json"
+RECORDINGS_DIR = APP_DIR / "recordings"
 LOG_PATH = APP_DIR / "app.log"
 SOUNDS_DIR = APP_DIR / "sounds"
 
@@ -753,6 +761,23 @@ def input_devices() -> list[tuple[str, str]]:
     return devices
 
 
+def smooth_audio_level(previous: float, target: float) -> float:
+    """Follow louder input quickly and let quieter input fall back gradually."""
+    if target >= previous:
+        return previous + (target - previous) * WAVE_ATTACK
+    level = max(target, previous * WAVE_RELEASE)
+    return level if level >= 0.01 else 0.0
+
+
+def blend_hex(color: str, background: str, amount: float) -> str:
+    """Mix `amount` of `color` over `background`; Tk canvas items have no alpha."""
+    channels = (
+        round(int(background[i:i + 2], 16) + (int(color[i:i + 2], 16) - int(background[i:i + 2], 16)) * amount)
+        for i in (1, 3, 5)
+    )
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
 class StatusBubble:
     def __init__(self, root: Tk, on_click) -> None:
         self.root = root
@@ -765,7 +790,8 @@ class StatusBubble:
         self.spinner_after_id = None
         self.spinner_angle = 0
         self.wave_after_id = None
-        self.wave_levels = [0.0] * 7
+        self.wave_levels = [0.0] * WAVE_BAR_COUNT
+        self.wave_envelope = 0.0
         self.audio_level_provider = lambda: 0.0
         self.recording_started_at = 0.0
         self.window = Toplevel(root)
@@ -865,19 +891,17 @@ class StatusBubble:
     def start_wave(self) -> None:
         self.stop_wave()
         self.recording_started_at = time.perf_counter()
-        self.wave_levels = [0.0] * 7
+        self.wave_levels = [0.0] * WAVE_BAR_COUNT
+        self.wave_envelope = 0.0
 
         def tick() -> None:
             if self.state != "recording":
                 self.wave_after_id = None
                 return
-            level = self.audio_level_provider()
-            if level > 0:
-                self.wave_levels = self.wave_levels[1:] + [level]
-            else:
-                self.wave_levels = [0.0] * 7
+            self.wave_envelope = smooth_audio_level(self.wave_envelope, self.audio_level_provider())
+            self.wave_levels = self.wave_levels[1:] + [self.wave_envelope]
             self.draw_recording_pill()
-            self.wave_after_id = self.root.after(50, tick)
+            self.wave_after_id = self.root.after(WAVE_TICK_MS, tick)
 
         tick()
 
@@ -978,16 +1002,16 @@ class StatusBubble:
         self.canvas.delete("all")
         self.draw_glass_pill()
         for index, level in enumerate(self.wave_levels):
-            height = 4 + level * 18
-            x = 18 + index * 5
+            height = 3 + level * 15
+            x = 17 + index * 4
             y_mid = 24
             self.canvas.create_line(
                 x,
                 y_mid - height / 2,
                 x,
                 y_mid + height / 2,
-                fill="#d92c3a",
-                width=3,
+                fill=blend_hex("#d92c3a", "#fff6f7", min(1.0, 0.3 + 0.7 * index / WAVE_FADED_BARS)),
+                width=2,
                 capstyle="round",
             )
 
@@ -1136,11 +1160,16 @@ class StartupSplash:
 
 
 class DictationEngine:
-    def __init__(self, config: Config, status_callback=None, state_callback=None, transcript_callback=None) -> None:
+    def __init__(
+        self, config: Config, status_callback=None, state_callback=None, transcript_callback=None,
+        recording_history: RecordingHistory | None = None, recording_callback=None,
+    ) -> None:
         self.config = config
         self.status_callback = status_callback or (lambda message: None)
         self.state_callback = state_callback or (lambda state: None)
         self.transcript_callback = transcript_callback or (lambda text: None)
+        self.recordings = recording_history if recording_history is not None else RecordingHistory(RECORDINGS_DIR)
+        self.recording_callback = recording_callback or (lambda: None)
         self.input_device: int | None = None
         self.input_device_error: str | None = None
         self._resolve_device(config)
@@ -1148,6 +1177,7 @@ class DictationEngine:
         self.audio_queue: queue.SimpleQueue = queue.SimpleQueue()
         self.audio_warning: str | None = None
         self.audio_level_reading = (0.0, 0.0)
+        self.audio_level_peak = 0.0
         self.stream: sd.InputStream | None = None
         self.active_session: RecordingSession | None = None
         self.state = "idle"
@@ -1245,6 +1275,7 @@ class DictationEngine:
             self.audio_queue = queue.SimpleQueue()
             self.audio_warning = None
             self.audio_level_reading = (0.0, 0.0)
+            self.audio_level_peak = 0.0
 
         stream: sd.InputStream | None = None
         try:
@@ -1333,15 +1364,19 @@ class DictationEngine:
                 math.log(rms / AUDIO_LEVEL_NOISE_FLOOR)
                 / math.log(AUDIO_LEVEL_FULL_SCALE / AUDIO_LEVEL_NOISE_FLOOR),
             )
-        # Publish one snapshot; the Tk timer reads it without queuing UI work
-        # from PortAudio's callback thread.
+        # Publish snapshots; the Tk timer reads them without queuing UI work
+        # from PortAudio's callback thread. The peak keeps short syllables that
+        # fall between two UI ticks.
+        self.audio_level_peak = max(self.audio_level_peak, level)
         self.audio_level_reading = (level, time.monotonic())
 
     def get_audio_level(self) -> float:
+        """Loudest level since the previous read, or the latest level if no new audio arrived yet."""
         level, updated_at = self.audio_level_reading
+        peak, self.audio_level_peak = self.audio_level_peak, 0.0
         if self.state != "recording" or time.monotonic() - updated_at > AUDIO_LEVEL_TIMEOUT_SECONDS:
             return 0.0
-        return level
+        return max(peak, level)
 
     def write_wav_and_stats(
         self,
@@ -1385,23 +1420,83 @@ class DictationEngine:
         rms = math.sqrt(sum_of_squares / sample_count) / 32768.0 if sample_count else 0.0
         return temp_path, duration, peak, rms
 
-    def transcribe_and_output(self, session: RecordingSession, frames: list[np.ndarray]) -> None:
+    def retry_recording(self, recording_id: str) -> None:
+        """Retry saved audio with current settings, without pasting into Settings."""
+        with self.lock:
+            if self.state != "idle":
+                raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
+            if not self.config.api_key or self.client is None:
+                raise RuntimeError("Vul eerst je Groq API key in en sla je instellingen op.")
+            entry = self.recordings.get(recording_id)
+            config = self.config
+            session = RecordingSession(
+                input_device=None, sample_rate=config.sample_rate, channels=config.channels,
+                model=config.model, language=config.language,
+                prompt=compose_transcription_prompt(config.prompt, config.custom_words),
+                word_replacements=config.word_replacements, paste_after_transcription=False,
+                remove_final_period=config.remove_final_period, client=self.client,
+            )
+            self.state = "processing"
+        try:
+            self.emit_state("processing")
+            threading.Thread(
+                target=self.transcribe_and_output, args=(session, [], entry),
+                name="dictation-retry", daemon=True,
+            ).start()
+        except Exception:
+            with self.lock:
+                self.state = "idle"
+            self.emit_state("idle")
+            raise
+
+    def update_recording(self, entry: RecordingEntry, *, status: str, text: str | None = None, error: str = "") -> None:
+        self.recordings.update(entry.id, status=status, text=text, error=error)
+        self.recording_changed()
+
+    def recording_changed(self) -> None:
+        try:
+            self.recording_callback()
+        except Exception:
+            logging.exception("Could not refresh recording history")
+
+    def transcribe_and_output(
+        self, session: RecordingSession, frames: list[np.ndarray], recording: RecordingEntry | None = None,
+    ) -> None:
         wav_path: Path | None = None
+        temp_path: Path | None = None
         started_at = time.perf_counter()
         show_idle_bubble = True
         try:
-            wav_path, duration, peak, rms = self.write_wav_and_stats(session, frames)
-            frames.clear()
-            self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
-            if duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES:
-                self.notify("Transcriptie te kort. Er is niets geplakt.")
-                self.emit_state("too_short")
-                play_sound("error.wav")
-                show_idle_bubble = False
-                return
+            if recording is None:
+                temp_path, duration, peak, rms = self.write_wav_and_stats(session, frames)
+                frames.clear()
+                # Commit the WAV before any request, including recordings that
+                # are too short or receive an empty/error response from Groq.
+                try:
+                    recording = self.recordings.add(temp_path)
+                except Exception as exc:
+                    preserved_path = temp_path
+                    temp_path = None  # Keep the original as a last-resort backup.
+                    raise RuntimeError(
+                        f"Opname opslaan in Geschiedenis mislukt. Audio staat nog in {preserved_path}: {exc}"
+                    ) from exc
+                wav_path = self.recordings.audio_path(recording)
+                self.recording_changed()
+                self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
+                if duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES:
+                    self.update_recording(recording, status="failed", error="Opname te kort. Je kunt opnieuw proberen.")
+                    self.notify("Transcriptie te kort. Er is niets geplakt.")
+                    self.emit_state("too_short")
+                    play_sound("error.wav")
+                    show_idle_bubble = False
+                    return
 
-            if peak < 0.01:
-                self.notify("Waarschuwing: bijna geen inputvolume gemeten. Check microfoon/device.")
+                if peak < 0.01:
+                    self.notify("Waarschuwing: bijna geen inputvolume gemeten. Check microfoon/device.")
+            else:
+                wav_path = self.recordings.audio_path(recording)
+
+            self.update_recording(recording, status="processing")
 
             text = apply_word_replacements(
                 self.transcribe(session, wav_path).strip(),
@@ -1414,16 +1509,12 @@ class DictationEngine:
             elapsed = time.perf_counter() - started_at
 
             if not text:
-                self.notify("Geen tekst herkend.")
-                play_sound("error.wav")
-                return
+                raise RuntimeError("Geen tekst herkend. Opname bewaard; probeer opnieuw via Geschiedenis.")
 
             if set(text) == {"*"}:
-                pyperclip.copy(text)
-                self.notify("Groq gaf alleen sterretjes terug. Meestal is dit stilte of de verkeerde microfoon.")
-                play_sound("error.wav")
-                return
+                raise RuntimeError("Groq gaf alleen sterretjes terug. Check je microfoon of probeer opnieuw via Geschiedenis.")
 
+            self.update_recording(recording, status="done", text=text)
             pasted_text = append_trailing_space(text)
             pyperclip.copy(pasted_text)
             self.notify(f"Transcriptie klaar in {elapsed:.1f}s. Tekst staat op je klembord.")
@@ -1441,19 +1532,22 @@ class DictationEngine:
 
             play_sound("success.wav")
         except Exception as exc:
+            if recording is not None:
+                self.update_recording(recording, status="failed", error=str(exc))
             self.notify(f"Fout: {exc}")
             play_sound("error.wav")
         finally:
             frames.clear()
-            if wav_path is not None:
+            if temp_path is not None:
                 try:
-                    wav_path.unlink(missing_ok=True)
+                    temp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
             with self.lock:
                 self.state = "idle"
             if show_idle_bubble:
                 self.emit_state("idle")
+            self.recording_changed()
             self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")
 
     def transcribe(self, session: RecordingSession, wav_path: Path) -> str:
@@ -1530,7 +1624,11 @@ class TrayApp:
             self.config = load_config()
             self.bubble = StatusBubble(self.root, self.on_bubble_click)
             self.history = TranscriptionHistory(HISTORY_PATH)
-            self.engine = DictationEngine(self.config, self.set_status, self.set_engine_state, self.on_transcript)
+            self.recordings = RecordingHistory(RECORDINGS_DIR)
+            self.engine = DictationEngine(
+                self.config, self.set_status, self.set_engine_state, self.on_transcript,
+                self.recordings, self.on_recording_changed,
+            )
             self.bubble.audio_level_provider = self.engine.get_audio_level
             self.hotkeys = HotkeyListener(self.engine.on_shortcut)
             self.hotkey_error: str | None = None
@@ -1566,6 +1664,7 @@ class TrayApp:
             self.root.after(0, lambda: self.bubble.show_notice("Transcriptie te kort"))
         else:
             self.root.after(0, lambda: self.bubble.set_state(state))
+        self.root.after(0, self._refresh_history_view)
 
     def on_bubble_click(self) -> None:
         """The floating bubble stops a running recording; otherwise it opens settings."""
@@ -1645,11 +1744,28 @@ class TrayApp:
     def history_entries(self) -> tuple[HistoryEntry, ...]:
         return self.history.entries
 
+    def recording_entries(self) -> tuple[RecordingEntry, ...]:
+        return self.recordings.entries
+
+    def recording_busy(self) -> bool:
+        with self.engine.lock:
+            return self.engine.state != "idle"
+
+    def on_recording_changed(self) -> None:
+        self.root.after(0, self._refresh_history_view)
+
+    def retry_recording(self, recording_id: str) -> None:
+        self.engine.retry_recording(recording_id)
+
     def copy_text(self, text: str) -> None:
         pyperclip.copy(text)
 
     def clear_history(self) -> None:
-        self.history.clear()
+        with self.engine.lock:
+            if self.engine.state != "idle":
+                raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
+            self.recordings.clear()
+            self.history.clear()
 
     def test_api_key(self, api_key: str) -> str:
         client = Groq(api_key=api_key)
