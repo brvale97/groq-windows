@@ -48,8 +48,8 @@ class FakeController:
         self.retried = recording_id
         self.busy = True
 
-    def play_recording(self, recording_id):
-        self.played = [*getattr(self, "played", []), recording_id]
+    def play_recording(self, recording_id, offset=0.0):
+        self.played = [*getattr(self, "played", []), (recording_id, offset)]
         return 0.1
 
     def stop_playback(self):
@@ -207,37 +207,50 @@ class SettingsWindowTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_recording_playback_toggles_and_resets_after_audio_ends(self):
+    def test_recording_player_plays_pauses_seeks_and_resets_after_audio_ends(self):
         import app
         from history import RecordingEntry
 
         app_module, root, controller, window = self.open_window(app.Config(api_key='test-only'))
         try:
-            controller.recordings = [
-                RecordingEntry(text='Hallo', created_at=2_000_000_000.0, id='a' * 32, duration=0.1, status='done'),
-                RecordingEntry(text='', created_at=1_900_000_000.0, id='b' * 32, duration=0.1, status='failed'),
+            a, b = 'a' * 32, 'b' * 32
+            entries = [
+                RecordingEntry(text='Hallo', created_at=2_000_000_000.0, id=a, duration=0.3, status='done'),
+                RecordingEntry(text='', created_at=1_900_000_000.0, id=b, duration=10.0, status='failed'),
             ]
+            controller.recordings = entries
             window.refresh_history()
             window.select_page('history')
             root.update()
-            play_buttons = [w for w in self.descendants(window) if isinstance(w, app_module.ttk.Button) and w.cget('text') == 'Afspelen']
-            self.assertEqual(len(play_buttons), 2)
-            play_buttons[0].invoke()
-            self.assertEqual(controller.played, ['a' * 32])
-            self.assertEqual(play_buttons[0].cget('text'), 'Stoppen')
-            play_buttons[1].invoke()
-            self.assertEqual(controller.played, ['a' * 32, 'b' * 32])
-            self.assertEqual(play_buttons[0].cget('text'), 'Afspelen')
-            self.assertEqual(play_buttons[1].cget('text'), 'Stoppen')
-            play_buttons[1].invoke()
-            self.assertEqual(play_buttons[1].cget('text'), 'Afspelen')
-            self.assertEqual(controller.stopped, 2)
-            play_buttons[0].invoke()
+            self.assertEqual(set(window.players), {a, b})
+            self.assertTrue(window.players[a].winfo_viewable())
+            self.assertFalse(window.players[a].playing)
+
+            window.seek_recording(entries[1], 0.5)  # Seeking while paused only moves the knob.
+            self.assertFalse(hasattr(controller, 'played'))
+            self.assertAlmostEqual(window.players[b].position, 5.0)
+            window.toggle_recording_playback(entries[1])
+            self.assertEqual(controller.played, [(b, 5.0)])
+            self.assertTrue(window.players[b].playing)
+            window.seek_recording(entries[1], 0.2)
+            self.assertEqual(controller.played[-1], (b, 2.0))
+
+            window.toggle_recording_playback(entries[0])  # Another recording pauses the first.
+            self.assertFalse(window.players[b].playing)
+            self.assertGreaterEqual(window.playback_positions[b], 2.0)
+            self.assertTrue(window.players[a].playing)
+            window.toggle_recording_playback(entries[0])
+            self.assertFalse(window.players[a].playing)
+            self.assertEqual(controller.stopped, 3)
+
+            window.playback_positions[a] = 0.0
+            window.toggle_recording_playback(entries[0])
             deadline = time.monotonic() + 2
-            while play_buttons[0].cget('text') == 'Stoppen' and time.monotonic() < deadline:
+            while window.players[a].playing and time.monotonic() < deadline:
                 root.update()
                 time.sleep(0.02)
-            self.assertEqual(play_buttons[0].cget('text'), 'Afspelen')
+            self.assertFalse(window.players[a].playing)
+            self.assertEqual(window.players[a].position, 0.0)
             self.assertFalse(window.dirty)
         finally:
             root.destroy()

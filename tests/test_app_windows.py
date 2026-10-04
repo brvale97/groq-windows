@@ -342,6 +342,14 @@ class WindowsAppTests(unittest.TestCase):
             self.assertEqual(Path(path), tray_app.recordings.audio_path(entry))
             self.assertTrue(flags & app.winsound.SND_ASYNC)
             self.assertEqual(play.call_args_list[1].args, (None, 0))
+            with mock.patch.object(app, "PLAYBACK_DIR", Path(directory) / "playback"), \
+                    mock.patch.object(app.winsound, "PlaySound") as play:
+                tray_app.play_recording(entry.id, 0.25)
+                clip = Path(play.call_args.args[0])
+                with wave.open(str(clip), "rb") as audio:
+                    self.assertEqual(audio.getnframes(), 4000)
+                tray_app.play_recording(entry.id, 0.4)
+                self.assertFalse(clip.exists())
             with self.assertRaises(RuntimeError):
                 tray_app.play_recording("c" * 32)
 

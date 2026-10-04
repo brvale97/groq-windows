@@ -128,11 +128,13 @@ retry while idle, including after correcting your connection or settings.
 **Geschiedenis wissen** removes both the saved audio and the transcripts.
 Recordings deleted by older app versions cannot be recovered.
 
-## Listening back to recordings (0.1.24)
+## Listening back to recordings (0.1.24, player 0.1.25)
 
 <!-- Source: Bram's request, 2026-10-04. Scope: Groq Windows Dictation. Play saved recordings from the history. -->
 
-Each recording in the **Opnames** tab has an **Afspelen** button that plays the
-saved audio through the default Windows output device. While it plays the button
-reads **Stoppen**; starting another recording, a new dictation cue, closing the
-window or clearing the history also stops playback.
+Each recording in the **Opnames** tab has a small player: a play/pause button,
+a progress bar you can click or drag to jump to another moment, and the elapsed
+and total time. Audio plays through the default Windows output device. Pausing
+keeps your position; playing another recording, a new dictation cue, closing the
+window or clearing the history stops playback. Because `winsound` cannot seek,
+playing from the middle copies the rest of the WAV to a temporary file.

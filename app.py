@@ -16,7 +16,7 @@ import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.24"
+APP_VERSION = "0.1.25"
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
@@ -128,6 +128,7 @@ HISTORY_PATH = APP_DIR / "history.json"
 RECORDINGS_DIR = APP_DIR / "recordings"
 LOG_PATH = APP_DIR / "app.log"
 SOUNDS_DIR = APP_DIR / "sounds"
+PLAYBACK_DIR = Path(tempfile.gettempdir()) / f"{APP_SLUG}-playback"
 
 
 def setup_logging() -> None:
@@ -742,6 +743,26 @@ def play_audio_file(path: Path) -> None:
     if winsound is None:
         raise RuntimeError("Afspelen werkt alleen op Windows.")
     winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+
+
+def playback_clip(source: Path, offset: float) -> Path:
+    """Copy the WAV from ``offset`` on, because winsound cannot seek."""
+    PLAYBACK_DIR.mkdir(parents=True, exist_ok=True)
+    for old in PLAYBACK_DIR.glob("*.wav"):
+        try:
+            old.unlink()
+        except OSError:
+            pass  # Still in use; removed by a later seek.
+    with wave.open(str(source), "rb") as audio:
+        params = audio.getparams()
+        audio.setpos(min(audio.getnframes(), max(0, int(offset * audio.getframerate()))))
+        frames = audio.readframes(audio.getnframes())
+    with tempfile.NamedTemporaryFile(dir=PLAYBACK_DIR, suffix=".wav", delete=False) as temp:
+        clip = Path(temp.name)
+    with wave.open(str(clip), "wb") as output:
+        output.setparams(params)
+        output.writeframes(frames)
+    return clip
 
 
 def stop_audio() -> None:
@@ -1769,9 +1790,10 @@ class TrayApp:
     def retry_recording(self, recording_id: str) -> None:
         self.engine.retry_recording(recording_id)
 
-    def play_recording(self, recording_id: str) -> float:
+    def play_recording(self, recording_id: str, offset: float = 0.0) -> float:
         entry = self.recordings.get(recording_id)
-        play_audio_file(self.recordings.audio_path(entry))
+        path = self.recordings.audio_path(entry)
+        play_audio_file(playback_clip(path, offset) if offset > 0 else path)
         return entry.duration
 
     def stop_playback(self) -> None:

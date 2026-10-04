@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import dataclasses
 import threading
+import time
+from tkinter import font as tkfont
 from tkinter import END, BooleanVar, Canvas, Listbox, StringVar, TclError, Text, Tk, Toplevel, messagebox, ttk
 from typing import Protocol
 
@@ -252,7 +254,7 @@ class SettingsController(Protocol):
     def recording_entries(self) -> tuple[RecordingEntry, ...]: ...
     def recording_busy(self) -> bool: ...
     def retry_recording(self, recording_id: str) -> None: ...
-    def play_recording(self, recording_id: str) -> float: ...
+    def play_recording(self, recording_id: str, offset: float = 0.0) -> float: ...
     def stop_playback(self) -> None: ...
     def copy_text(self, text: str) -> None: ...
     def clear_history(self) -> None: ...
@@ -310,6 +312,105 @@ def bordered_text(parent, height: int) -> Text:
         undo=True,
     )
     return widget
+
+
+def format_clock(seconds: float) -> str:
+    whole = max(0, int(seconds))
+    return f"{whole // 60}:{whole % 60:02d}"
+
+
+class RecordingPlayer(Canvas):
+    """Compact audio player: play/pause button, seekable progress bar and time.
+
+    The widget only draws and reports clicks; the settings window owns the
+    playback state and calls :meth:`render` as the position changes.
+    """
+
+    def __init__(self, parent, scale: float, duration: float, on_toggle, on_seek) -> None:
+        self.scale = scale
+        self.duration = max(0.0, duration)
+        self.on_toggle = on_toggle
+        self.on_seek = on_seek
+        self.position = 0.0
+        self.playing = False
+        self.dragging = False
+        self.button_size = self.px(30)
+        super().__init__(
+            parent, width=self.px(160), height=self.px(34), background=COLORS["card"],
+            highlightthickness=0, borderwidth=0, cursor="hand2",
+        )
+        self.font = tkfont.Font(self, family=FONT_FAMILY, size=9)
+        self.time_width = self.font.measure(f"{format_clock(self.duration)} / {format_clock(self.duration)}".replace("1", "0"))
+        self.icons = {name: self._icon(name) for name in ("play", "pause")}
+        self.bind("<Configure>", lambda _event: self.render(self.position, self.playing))
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def px(self, logical: float) -> int:
+        return max(1, round(logical * self.scale))
+
+    def _icon(self, name: str) -> ImageTk.PhotoImage:
+        size = self.button_size
+        big = size * 4
+        bitmap = Image.new("RGBA", (big, big), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(bitmap)
+        draw.ellipse((0, 0, big - 1, big - 1), fill=COLORS["accent"])
+        if name == "play":
+            draw.polygon(
+                [(big * 0.40, big * 0.30), (big * 0.40, big * 0.70), (big * 0.72, big * 0.50)], fill="#ffffff",
+            )
+        else:
+            for left in (0.35, 0.55):
+                draw.rounded_rectangle(
+                    (big * left, big * 0.31, big * (left + 0.10), big * 0.69), radius=big * 0.03, fill="#ffffff",
+                )
+        return ImageTk.PhotoImage(bitmap.resize((size, size), Image.Resampling.LANCZOS), master=self)
+
+    def _track_bounds(self) -> tuple[int, int]:
+        start = self.button_size + self.px(14)
+        end = max(start + self.px(20), self.winfo_width() - self.time_width - self.px(16))
+        return start, end
+
+    def render(self, position: float, playing: bool) -> None:
+        self.position = min(max(0.0, position), self.duration)
+        self.playing = playing
+        self.delete("all")
+        middle = max(self.winfo_height(), self.winfo_reqheight()) // 2
+        self.create_image(0, middle, image=self.icons["pause" if playing else "play"], anchor="w")
+        start, end = self._track_bounds()
+        fraction = self.position / self.duration if self.duration else 0.0
+        current = start + (end - start) * fraction
+        thickness = self.px(4)
+        self.create_line(start, middle, end, middle, fill=COLORS["field_border"], width=thickness, capstyle="round")
+        if current > start:
+            self.create_line(start, middle, current, middle, fill=COLORS["accent"], width=thickness, capstyle="round")
+        radius = self.px(6)
+        self.create_oval(current - radius, middle - radius, current + radius, middle + radius, fill=COLORS["accent"], outline="")
+        self.create_text(
+            self.winfo_width() - self.time_width, middle, anchor="w", fill=COLORS["muted"],
+            font=self.font, text=f"{format_clock(self.position)} / {format_clock(self.duration + 0.5)}",
+        )
+
+    def _fraction(self, x: int) -> float:
+        start, end = self._track_bounds()
+        return min(1.0, max(0.0, (x - start) / max(1, end - start)))
+
+    def _press(self, event) -> None:
+        if event.x <= self.button_size + self.px(4):
+            self.on_toggle()
+            return
+        self.dragging = True
+        self._drag(event)
+
+    def _drag(self, event) -> None:
+        if self.dragging:
+            self.render(self._fraction(event.x) * self.duration, self.playing)
+
+    def _release(self, event) -> None:
+        if self.dragging:
+            self.dragging = False
+            self.on_seek(self._fraction(event.x))
 
 
 class ListEditor(ttk.Frame):
@@ -485,9 +586,11 @@ class SettingsWindow(Toplevel):
         self.capturing = False
         self.capture_bind_id: str | None = None
         self.api_key_visible = False
-        self.playing_recording_id: str | None = None
+        # (recording id, start offset, monotonic start, duration) while audio plays.
+        self.playback: tuple[str, float, float, float] | None = None
         self.playback_after_id: str | None = None
-        self.play_buttons: dict[str, ttk.Button] = {}
+        self.playback_positions: dict[str, float] = {}
+        self.players: dict[str, RecordingPlayer] = {}
 
         # State that is edited by the pages and read back by save().
         self.api_key = StringVar(value=config.api_key)
@@ -695,8 +798,8 @@ class SettingsWindow(Toplevel):
     def refresh_recordings(self, entries: tuple[RecordingEntry, ...], busy: bool) -> None:
         for child in self.recording_host.winfo_children():
             child.destroy()
-        self.play_buttons = {}
-        if self.playing_recording_id not in {entry.id for entry in entries}:
+        self.players = {}
+        if self.playback is not None and self.playback[0] not in {entry.id for entry in entries}:
             self.stop_recording_playback()
         if not entries:
             empty = Card(
@@ -709,14 +812,17 @@ class SettingsWindow(Toplevel):
         for index, entry in enumerate(entries):
             row = ttk.Frame(self.recording_host, style="Card.TFrame", padding=(14, 10, 14, 12))
             row.grid(row=index, column=0, sticky="ew", pady=(0 if index == 0 else 8, 0))
-            row.columnconfigure(0, weight=1)
-            ttk.Label(row, text=f"{entry.label()} · {entry.duration:.1f} s", style="CardMuted.TLabel").grid(row=0, column=0, sticky="w")
-            play = ttk.Button(
-                row, text="Stoppen" if entry.id == self.playing_recording_id else "Afspelen", style="Ghost.TButton",
-                command=lambda e=entry: self.toggle_recording_playback(e),
+            row.columnconfigure(0, minsize=self.px(110))
+            row.columnconfigure(1, weight=1)
+            ttk.Label(row, text=entry.label(), style="CardMuted.TLabel").grid(row=0, column=0, sticky="w")
+            player = RecordingPlayer(
+                row, self.scale, entry.duration,
+                on_toggle=lambda e=entry: self.toggle_recording_playback(e),
+                on_seek=lambda fraction, e=entry: self.seek_recording(e, fraction),
             )
-            play.grid(row=0, column=1, sticky="e", padx=(8, 0))
-            self.play_buttons[entry.id] = play
+            player.grid(row=0, column=1, sticky="ew", padx=(16, 0))
+            self.players[entry.id] = player
+            self.render_player(entry.id)
             retry = ttk.Button(
                 row, text="Opnieuw transcriberen", style="Ghost.TButton",
                 command=lambda e=entry: self.retry_recording(e),
@@ -729,6 +835,7 @@ class SettingsWindow(Toplevel):
                 copy.configure(command=lambda e=entry, b=copy: self.copy_history_entry(e, b))
                 copy.grid(row=1, column=2, sticky="e", pady=(4, 0))
                 text = bordered_text(row, height=2)
+                text.configure(width=20)  # Width follows the card, not 80 characters.
                 text.insert("1.0", entry.text)
                 text.configure(state="disabled", cursor="arrow")
                 text.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -737,44 +844,71 @@ class SettingsWindow(Toplevel):
                     row, text=entry.error, style="CardMuted.TLabel", justify="left", wraplength=self.px(530),
                 ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
+    def playback_position(self, recording_id: str) -> float:
+        if self.playback is not None and self.playback[0] == recording_id:
+            _, offset, started, duration = self.playback
+            return min(duration, offset + time.monotonic() - started)
+        return self.playback_positions.get(recording_id, 0.0)
+
+    def render_player(self, recording_id: str) -> None:
+        player = self.players.get(recording_id)
+        if player is not None and player.winfo_exists() and not player.dragging:
+            playing = self.playback is not None and self.playback[0] == recording_id
+            player.render(self.playback_position(recording_id), playing)
+
     def toggle_recording_playback(self, entry: RecordingEntry) -> None:
-        if entry.id == self.playing_recording_id:
+        if self.playback is not None and self.playback[0] == entry.id:
             self.stop_recording_playback()
             return
+        position = self.playback_positions.get(entry.id, 0.0)
+        self.start_recording_playback(entry, 0.0 if position >= entry.duration - 0.05 else position)
+
+    def seek_recording(self, entry: RecordingEntry, fraction: float) -> None:
+        position = fraction * entry.duration
+        if self.playback is not None and self.playback[0] == entry.id and position < entry.duration - 0.05:
+            self.start_recording_playback(entry, position)
+            return
+        self.playback_positions[entry.id] = position
+        self.render_player(entry.id)
+
+    def start_recording_playback(self, entry: RecordingEntry, offset: float) -> None:
         self.stop_recording_playback()
         try:
-            duration = self.controller.play_recording(entry.id)
+            self.controller.play_recording(entry.id, offset)
         except Exception as exc:
             self.set_status(f"Afspelen mislukt: {exc}")
             return
-        self.playing_recording_id = entry.id
-        self._set_play_button(entry.id, "Stoppen")
-        # Playback is fire-and-forget; reset the button once the audio has ended.
-        self.playback_after_id = self.after(max(250, int(duration * 1000) + 250), self._playback_finished)
+        self.playback = (entry.id, offset, time.monotonic(), entry.duration)
+        self._playback_tick()
 
     def stop_recording_playback(self) -> None:
+        """Pause: keep the position so the next play resumes there."""
         if self.playback_after_id is not None:
             self.after_cancel(self.playback_after_id)
             self.playback_after_id = None
-        if self.playing_recording_id is None:
+        if self.playback is None:
             return
-        self._set_play_button(self.playing_recording_id, "Afspelen")
-        self.playing_recording_id = None
+        recording_id = self.playback[0]
+        self.playback_positions[recording_id] = self.playback_position(recording_id)
+        self.playback = None
+        self.render_player(recording_id)
         try:
             self.controller.stop_playback()
         except Exception as exc:
             self.set_status(f"Stoppen mislukt: {exc}")
 
-    def _playback_finished(self) -> None:
+    def _playback_tick(self) -> None:
+        # winsound cannot report progress, so the position follows the clock.
         self.playback_after_id = None
-        if self.playing_recording_id is not None:
-            self._set_play_button(self.playing_recording_id, "Afspelen")
-            self.playing_recording_id = None
-
-    def _set_play_button(self, recording_id: str, text: str) -> None:
-        button = self.play_buttons.get(recording_id)
-        if button is not None and button.winfo_exists():
-            button.configure(text=text)
+        if self.playback is None:
+            return
+        recording_id, _, _, duration = self.playback
+        if self.playback_position(recording_id) >= duration:
+            self.playback = None
+            self.playback_positions[recording_id] = 0.0
+        else:
+            self.playback_after_id = self.after(50, self._playback_tick)
+        self.render_player(recording_id)
 
     def retry_recording(self, entry: RecordingEntry) -> None:
         try:
@@ -1199,7 +1333,7 @@ class SettingsWindow(Toplevel):
         self.destroy()
 
     def destroy(self) -> None:
-        if self.playing_recording_id is not None:
+        if self.playback is not None:
             self.stop_recording_playback()
         super().destroy()
 
