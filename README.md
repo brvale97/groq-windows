@@ -31,15 +31,21 @@ For normal use, build the Windows app:
 .\build-app.ps1
 ```
 
-The resulting app is written to `dist\GroqInsertDictation.exe`.
+The resulting app is a folder build in `dist\GroqInsertDictation\`
+(`GroqInsertDictation.exe` plus `_internal`), with the update package
+`dist\GroqInsertDictation-win64.zip` and the manifest
+`dist\GroqInsertDictation.build.json`. `.\build-app.ps1 -Bridge` also builds the
+single-file `dist\GroqInsertDictation.exe` for release (see Updates).
 
-To install it in your user profile and enable automatic startup:
+To install it in your user profile and enable automatic startup (quit the
+running app first):
 
 ```powershell
 .\install-app.ps1
 ```
 
-This copies the app to `%LOCALAPPDATA%\Programs\GroqInsertDictation\GroqInsertDictation.exe`.
+This copies the folder build to `%LOCALAPPDATA%\Programs\GroqInsertDictation\`
+and keeps the previous version in a `backup-<date>` folder next to it.
 
 The Settings window opens the first time you run the app. Enter your Groq API key, optionally select a microphone, configure the shortcut if desired, and leave automatic startup enabled.
 
@@ -70,7 +76,17 @@ Runtime and build dependencies are kept separately in `requirements.txt` and `re
 
 ## Updates
 
-The app checks for a newer GitHub Release when it starts. If an update is available, a window with an update button appears. The updater replaces only the executable; your settings and API key remain in `%APPDATA%` and Windows Credential Manager.
+The app checks for a newer GitHub Release when it starts. If an update is available, a window with an update button appears. Your settings, history and API key remain in `%APPDATA%` and Windows Credential Manager.
+
+From 0.2.0 the updater installs the folder build: it downloads
+`GroqInsertDictation-win64.zip`, verifies its SHA-256 against
+`GroqInsertDictation.build.json`, unpacks it next to the installed app, swaps
+`GroqInsertDictation.exe` and `_internal` after the app has exited, and restores
+the previous version if the new one exits before confirming its start. A folder
+install never accepts an exe-only release. Releases also carry a single-file
+`GroqInsertDictation.exe`, because updaters up to 0.1.27 replace exactly one
+file; that bridge build runs on its own and moves to the folder layout on its
+next update.
 
 ## Note
 
@@ -105,9 +121,31 @@ per entry and a "Geschiedenis wissen" button. It is stored locally in
 The app now ships its own icon (`branding.py`): embedded in the executable, used by the
 tray and shown on every window and in the taskbar instead of the default Tk feather.
 
+<!-- Source: Bram's requests, 2026-10-06. Scope: Groq Windows Dictation. Sharp taskbar icon and visible selected microphone. -->
+Version **0.1.26** supplies native icon sizes for the title bar and taskbar, with
+each ICO frame rendered separately. The microphone selector shows the actual
+device name even when following **Windows-standaard**. The complete selection is
+also shown below the selector so long names remain readable. **Vernieuwen** keeps
+your selection; a missing selected device is shown as unavailable.
+
+<!-- Source: Bram's request, 2026-10-06. Scope: Groq Windows Dictation. Replace sound cues preview with a microphone test and remove unplugged microphones from the device list. -->
+In **0.1.27**, **Microfoon testen** records five seconds from the selected input,
+including an unsaved selection, with a live input meter and **Terugluisteren**.
+The test stays local, does not contact Groq or enter History, and is discarded
+when you close Settings or start another test. Stop the test at any time with
+**Stop test**. Silence and disconnected/unavailable devices are reported.
+The former **Geluiden testen** preview has been removed.
+
+Opening Settings or clicking **Vernieuwen** now reinitializes PortAudio while
+idle, so unplugged USB microphones and changed Windows defaults are detected.
+The device list uses Windows audio endpoints without duplicate backend entries,
+and explicit choices use names instead of volatile PortAudio indices. Legacy
+indices are migrated when a unique matching Windows endpoint is available.
+
 The Windows widget tests require an interactive desktop. They verify navigation,
 visible control bounds, dictionary edits, saving, shortcut capture and cancelling
-without saving.
+without saving. (Since 0.2.0 these are Qt tests that also run headless with
+`QT_QPA_PLATFORM=offscreen`; see the 0.2.0 section.)
 
 ## Voice recording recovery (0.1.23)
 
@@ -135,6 +173,72 @@ Recordings deleted by older app versions cannot be recovered.
 Each recording in the **Opnames** tab has a small player: a play/pause button,
 a progress bar you can click or drag to jump to another moment, and the elapsed
 and total time. Audio plays through the default Windows output device. Pausing
-keeps your position; playing another recording, a new dictation cue, closing the
-window or clearing the history stops playback. Because `winsound` cannot seek,
-playing from the middle copies the rest of the WAV to a temporary file.
+keeps your position; playing another recording, starting a dictation, closing the
+window or clearing the history stops playback. (0.1.24 copied the rest of the WAV
+to a temporary file to seek with `winsound`; 0.2.0 replaces that, see below.)
+
+## Modern Qt interface (0.2.0)
+
+<!-- Source: Bram's explicit instruction "Oke laat opus maar bouwen", 2026-10-06, confirming the Python + PySide6/Qt Widgets modernization. Scope: Groq Windows Dictation. -->
+
+Bram decided on 2026-10-06 to keep Python and replace Tkinter/ttk, pystray and
+the winsound-based player with **PySide6 (Qt for Python) using Qt Widgets**, not
+Qt Quick/QML and not Electron/Tauri. The settings are mostly forms and lists,
+which map directly to Qt Widgets in plain Python.
+
+**Architecture.** UI-independent code moved out of `app.py`:
+
+- `config_store.py`: version, data paths, settings file and Credential Manager.
+- `engine.py`: recording (sounddevice/PortAudio, WASAPI with per-thread COM
+  initialization and `WasapiSettings(auto_convert=True)` for explicit inputs),
+  device list, cues, Groq transcription and pasting. The code is the 0.1.27 code,
+  moved unchanged apart from paths.
+- `audio_player.py`: seekable playback for History and the microphone test.
+- `windows_services.py`: single instance, autostart and launch commands.
+- `updater.py`: release selection, verified download and the swap script.
+- `ui_theme.py`: light/dark palettes with the existing green accent, the style
+  sheet and vector icons painted at the exact size and DPI Windows requests.
+- `settings_ui.py`: the settings window (same six pages and the same
+  `SettingsController` boundary), `app.py`: tray, status bubble, splash, update
+  dialog and the Qt adapter that turns engine callbacks from worker threads into
+  signals handled on the GUI thread.
+
+**Behaviour.**
+
+- The interface follows the Windows light/dark setting, uses Segoe UI at a
+  readable size, scales per monitor (100/125/150 %) and draws icons sharply at
+  every size. The tray icon opens Settings on a click; the menu is unchanged.
+- The status bubble is a translucent, anti-aliased pill with the scrolling
+  waveform, timer and stop button, a spinner while transcribing, and notices.
+  It is a tool window that never accepts focus (`WindowDoesNotAcceptFocus`,
+  `WS_EX_NOACTIVATE`, `MA_NOACTIVATE`), so showing it or clicking it to stop
+  keeps the window you dictate into active and Ctrl+V lands there.
+- History playback and **Terugluisteren** use PortAudio output with the PCM in
+  memory: the position shown is the position actually played, seeking needs no
+  temporary files, and a dictation, refresh or clearing history releases the
+  output device first. Cues still use `winsound`.
+- Settings, API key, history and recordings from 0.1.x are read unchanged; an
+  unchanged settings file stays byte-identical.
+
+**Distribution.** The app ships as a folder build (onedir). On AMD (Ryzen,
+NVMe, Windows 11, 125 %) the folder build reported "ready" 2.0-2.1 s after launch
+versus 3.2-3.4 s for the single-file build (three runs each, both including the
+deliberate 1.25 s splash minimum); the single file unpacks ~100 MB into a
+temporary folder on every autostart. The folder build also keeps the LGPL-licensed Qt libraries as
+replaceable DLLs. The update package is a 46 MB zip (107 MB unpacked); Qt parts
+the app does not use (software OpenGL, QML/Quick, PDF, image-format and spare
+platform plugins, translations) and Tk are left out. See `THIRD_PARTY_NOTICES.md`
+for Qt for Python's license (PyPI: LGPLv3/GPLv2/GPLv3 or commercial; used under
+the LGPLv3) and the bundled license texts.
+
+**Testing.** `python -m unittest discover -s tests` runs everywhere; on Linux
+Qt uses the offscreen platform. `tests/test_desktop_windows.py`
+(`GROQ_DESKTOP_E2E=1`) and `packaging/desktop-e2e.ps1` (for a built app) drive a
+real, unlocked Windows desktop: shortcut via `SendInput`, real microphone, a
+click on the bubble and Ctrl+V into a separate window, with offline QA
+transcripts instead of Groq. Both use the isolated profile
+`GROQ_DICTATION_PROFILE=qa` (own settings folder, Credential Manager entry and
+mutex, never autostarts), so they can run next to an installed copy.
+`packaging/desktop-e2e-apps.ps1` repeats the paste check in Word, Edge and
+Chrome (new document closed without saving, throwaway browser profiles). On
+2026-10-07 all of these passed on AMD main; Teams was not available to test.

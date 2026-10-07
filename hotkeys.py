@@ -50,8 +50,8 @@ MODIFIER_FLAGS = {
     "windows": MOD_WIN,
 }
 
-# Spellings that users, ``keyboard``-style settings files, or Tk keysyms may
-# use for the same modifier or key.
+# Spellings that users, ``keyboard``-style settings files, or toolkits may use
+# for the same modifier or key.
 ALIASES = {
     "control": "ctrl",
     "ctl": "ctrl",
@@ -275,87 +275,44 @@ def validate_hotkey(value: str) -> Hotkey:
     return parse_hotkey(value)
 
 
-TK_KEYSYM_ALIASES = {
-    "Return": "enter",
-    "KP_Enter": "enter",
-    "Escape": "esc",
-    "BackSpace": "backspace",
-    "Delete": "delete",
-    "Insert": "insert",
-    "Tab": "tab",
-    "space": "space",
-    "Prior": "page up",
-    "Next": "page down",
-    "Home": "home",
-    "End": "end",
-    "Up": "up",
-    "Down": "down",
-    "Left": "left",
-    "Right": "right",
-    "Pause": "pause",
-    "Print": "print screen",
-    "Snapshot": "print screen",
-    "Scroll_Lock": "scroll lock",
-    "Caps_Lock": "caps lock",
-    "Num_Lock": "num lock",
-    "App": "apps",
-    "Menu": "apps",
-    "Control_L": "ctrl",
-    "Control_R": "ctrl",
-    "Shift_L": "shift",
-    "Shift_R": "shift",
-    "Alt_L": "alt",
-    "Alt_R": "alt",
-    "Win_L": "windows",
-    "Win_R": "windows",
-    "Super_L": "windows",
-    "Super_R": "windows",
-}
-
-TK_STATE_SHIFT = 0x0001
-TK_STATE_CONTROL = 0x0004
-# Tk reports Alt as Mod1 (0x8) on X11, but on Windows Mod1 means Num Lock and
-# Alt is the dedicated ALT_MASK bit (0x20000). Reading 0x8 on Windows turns
-# every captured key into "alt+..." whenever Num Lock is on.
-TK_STATE_ALT_WINDOWS = 0x20000
-TK_STATE_MOD1 = 0x0008
-
-
-def normalize_tk_key(keysym: str) -> str:
-    return _normalize_part(TK_KEYSYM_ALIASES.get(keysym, keysym))
-
-
 VK_NAMES: dict[int, str] = {}
 for _name, _code in NAMED_KEYS.items():
     if _name.startswith(("num ", "numpad ")):
         continue
     VK_NAMES.setdefault(_code, _name)
 
+# Shift, Ctrl, Alt and the Windows keys, including their left/right variants.
+MODIFIER_VIRTUAL_KEYS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
 
-def hotkey_from_tk_event(event) -> str | None:
-    """Build shortcut text from a Tk ``<KeyPress>``; ``None`` for a lone modifier."""
-    key = normalize_tk_key(event.keysym)
+
+def hotkey_from_key_press(
+    *,
+    key_name: str,
+    virtual_key: int = 0,
+    ctrl: bool = False,
+    alt: bool = False,
+    shift: bool = False,
+    windows: bool = False,
+) -> str | None:
+    """Build shortcut text from a captured key press; ``None`` for a lone modifier.
+
+    ``key_name`` is the toolkit's key in this module's spelling (``insert``,
+    ``f9``, ``a``, ``,``). On Windows ``virtual_key`` is the native virtual-key
+    code, which is exactly what ``RegisterHotKey`` needs and does not depend
+    on Shift/AltGr symbols, so it wins whenever it is known.
+    """
+    if virtual_key in MODIFIER_VIRTUAL_KEYS:
+        return None
+    key = _normalize_part(key_name or "")
     if key in MODIFIER_FLAGS:
         return None
-
-    # On Windows Tk exposes the virtual-key code directly, which is exactly
-    # what RegisterHotKey needs and is independent of Shift/AltGr symbols.
-    keycode = int(getattr(event, "keycode", 0) or 0)
-    if os.name == "nt" and keycode in VK_NAMES:
-        key = VK_NAMES[keycode]
-    elif len(key) != 1 and key not in NAMED_KEYS:
-        char = getattr(event, "char", "") or ""
-        if len(char) == 1 and char.isprintable() and not char.isspace():
-            key = char.lower()
-
-    state = int(event.state)
-    parts: list[str] = []
-    if state & TK_STATE_CONTROL:
-        parts.append("ctrl")
-    if state & TK_STATE_ALT_WINDOWS or (os.name != "nt" and state & TK_STATE_MOD1):
-        parts.append("alt")
-    if state & TK_STATE_SHIFT:
-        parts.append("shift")
+    if os.name == "nt" and virtual_key in VK_NAMES:
+        key = VK_NAMES[virtual_key]
+    if not key:
+        return None
+    parts = [
+        name for name, active in (("ctrl", ctrl), ("alt", alt), ("shift", shift), ("windows", windows)) if active
+    ]
     parts.append(key)
     try:
         return str(parse_hotkey("+".join(parts)))

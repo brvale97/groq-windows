@@ -41,7 +41,16 @@ def write_icon(path: str | Path) -> Path:
     """Write a multi-resolution Windows .ico file."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    draw_icon(256).save(target, format="ICO", sizes=[(n, n) for n in ICO_SIZES])
+    # Render each size directly. Bitmap frames work with Tk 8.6's Windows ICO
+    # reader; its PNG-frame fallback can otherwise pick the smallest icon.
+    frames = [draw_icon(size) for size in ICO_SIZES]
+    frames[-1].save(
+        target,
+        format="ICO",
+        bitmap_format="bmp",
+        sizes=[frame.size for frame in frames],
+        append_images=frames[:-1],
+    )
     return target
 
 

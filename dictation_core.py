@@ -13,6 +13,8 @@ MAX_CUSTOM_WORD_LENGTH = 50
 MAX_VOCABULARY_PROMPT_BYTES = 192
 MAX_WORD_REPLACEMENTS = 50
 MAX_REPLACEMENT_PART_LENGTH = 80
+# Selector label prefix for "follow the Windows default input".
+DEFAULT_DEVICE_LABEL = "Windows-standaard"
 
 
 class DictionaryValidationError(ValueError):

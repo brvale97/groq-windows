@@ -1,24 +1,45 @@
-"""Settings window for Groq Insert Dictation.
+"""Settings window for Groq Insert Dictation (Qt Widgets).
 
-The window is a plain Tk/ttk implementation so the app stays a single small
-PyInstaller executable. It talks to the tray application through a small
-"controller" object (see :class:`SettingsController`) instead of importing
-``app`` directly, which keeps the UI testable without a microphone, tray icon
-or Groq credentials.
+The window talks to the running application through a small controller
+object (see :class:`SettingsController`) instead of importing ``app``, which
+keeps it testable without a microphone, tray icon or Groq credentials.
+Controller calls happen on the GUI thread; slow work (the Groq connection
+test) runs on a worker thread and reports back through a Qt signal.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import threading
-import time
-from tkinter import font as tkfont
-from tkinter import END, BooleanVar, Canvas, Listbox, StringVar, TclError, Text, Tk, Toplevel, messagebox, ttk
 from typing import Protocol
 
-from PIL import Image, ImageDraw, ImageTk
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QKeySequence, QPainter, QShortcut
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QApplication,
+    QButtonGroup,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from dictation_core import (
+    DEFAULT_DEVICE_LABEL,
     MAX_CUSTOM_WORDS,
     MAX_WORD_REPLACEMENTS,
     DictionaryValidationError,
@@ -29,33 +50,11 @@ from dictation_core import (
     normalize_word_replacements,
 )
 from history import MAX_HISTORY_ENTRIES, MAX_RECORDING_ENTRIES, HistoryEntry, RecordingEntry
-from hotkeys import HotkeyError, hotkey_from_tk_event, normalize_hotkey_text, validate_hotkey
+from hotkeys import HotkeyError, hotkey_from_key_press, normalize_hotkey_text, validate_hotkey
+from microphone_test import MicrophoneTestStatus
+from ui_theme import app_icon, current_theme, draw_glyph, icon, repolish
 
-
-# --------------------------------------------------------------------------
-# Visual language
-# --------------------------------------------------------------------------
-
-FONT_FAMILY = "Segoe UI"
-COLORS = {
-    "shell": "#f3f6f5",
-    "content": "#ffffff",
-    "card": "#f8faf9",
-    "card_border": "#e1e8e5",
-    "text": "#1f2a33",
-    "muted": "#66756e",
-    "accent": "#176b53",
-    "accent_hover": "#1f8064",
-    "accent_pressed": "#114f3d",
-    "accent_soft": "#dceee8",
-    "accent_text": "#145c48",
-    "field_border": "#d3dcd8",
-    "field_focus": "#208065",
-    "danger": "#b3261e",
-    "success": "#1b7f5a",
-    "warning_bg": "#fff6e5",
-    "warning_text": "#8a5a00",
-}
+__all__ = ["DEFAULT_DEVICE_LABEL", "SettingsController", "SettingsWindow"]
 
 MODEL_OPTIONS = (
     ("whisper-large-v3-turbo", "Turbo: snelste antwoord, uitstekend voor dagelijks dicteren."),
@@ -69,166 +68,14 @@ LANGUAGE_OPTIONS = (
     ("es", "Spaans"),
     ("", "Automatisch herkennen"),
 )
-DEFAULT_DEVICE_LABEL = "Windows default input"
-
-
-def ui_scale(widget) -> float:
-    """Pixels per 96-DPI logical pixel; Tk's ``scaling`` is points-based (1.333 at 96 DPI)."""
-    try:
-        return max(0.75, float(widget.tk.call("tk", "scaling")) / (96 / 72))
-    except Exception:
-        return 1.0
-
-
-def apply_theme(root: Tk) -> None:
-    """One shared, DPI-aware visual language for every window of the app."""
-    root.option_add("*Listbox.font", (FONT_FAMILY, 10))
-    root.option_add("*Listbox.background", "#ffffff")
-    root.option_add("*Listbox.foreground", COLORS["text"])
-    root.option_add("*Listbox.selectBackground", COLORS["accent_soft"])
-    root.option_add("*Listbox.selectForeground", COLORS["accent_text"])
-    root.option_add("*Listbox.relief", "flat")
-    root.option_add("*Listbox.borderWidth", 0)
-    root.option_add("*Listbox.highlightThickness", 1)
-    root.option_add("*Listbox.highlightBackground", COLORS["field_border"])
-    root.option_add("*Listbox.highlightColor", COLORS["field_focus"])
-    root.option_add("*Listbox.activeStyle", "none")
-    root.option_add("*Text.font", (FONT_FAMILY, 10))
-    root.option_add("*TCombobox*Listbox.font", (FONT_FAMILY, 10))
-
-    style = ttk.Style(root)
-    style.theme_use("clam")
-    base_font = (FONT_FAMILY, 10)
-    style.configure(".", font=base_font, background=COLORS["content"], foreground=COLORS["text"])
-
-    # Surfaces
-    style.configure("TFrame", background=COLORS["content"])
-    style.configure("Shell.TFrame", background=COLORS["shell"])
-    style.configure(
-        "Card.TFrame",
-        background=COLORS["card"],
-        relief="solid",
-        borderwidth=1,
-        bordercolor=COLORS["card_border"],
-        lightcolor=COLORS["card_border"],
-        darkcolor=COLORS["card_border"],
-    )
-    style.configure("CardBody.TFrame", background=COLORS["card"])
-    style.configure("Footer.TFrame", background=COLORS["content"])
-    style.configure("TSeparator", background=COLORS["card_border"])
-
-    # Text
-    style.configure("TLabel", background=COLORS["content"])
-    style.configure("Muted.TLabel", foreground=COLORS["muted"])
-    style.configure("Title.TLabel", font=(FONT_FAMILY, 22, "bold"))
-    style.configure("Subtitle.TLabel", foreground=COLORS["muted"], font=(FONT_FAMILY, 10))
-    style.configure("Brand.TLabel", font=(FONT_FAMILY, 16, "bold"), background=COLORS["shell"], foreground=COLORS["accent_text"])
-    style.configure("Side.TLabel", background=COLORS["shell"], foreground=COLORS["muted"])
-    style.configure("Card.TLabel", background=COLORS["card"])
-    style.configure("CardTitle.TLabel", background=COLORS["card"], font=(FONT_FAMILY, 11, "bold"))
-    style.configure("CardMuted.TLabel", background=COLORS["card"], foreground=COLORS["muted"])
-    style.configure("CardSuccess.TLabel", background=COLORS["card"], foreground=COLORS["success"])
-    style.configure("CardDanger.TLabel", background=COLORS["card"], foreground=COLORS["danger"])
-    style.configure("Status.TLabel", foreground=COLORS["muted"])
-    style.configure("StatusDirty.TLabel", foreground=COLORS["warning_text"])
-
-    # Buttons
-    style.configure(
-        "TButton",
-        padding=(14, 8),
-        background="#e9efec",
-        foreground=COLORS["text"],
-        borderwidth=0,
-        focusthickness=2,
-        focuscolor="#a0c9bb",
-    )
-    style.map("TButton", background=[("active", "#dde6e2"), ("pressed", "#d0dbd6"), ("disabled", "#eef2f0")], foreground=[("disabled", "#9aa8a2")])
-    style.configure("Accent.TButton", background=COLORS["accent"], foreground="#ffffff")
-    style.map(
-        "Accent.TButton",
-        background=[("pressed", COLORS["accent_pressed"]), ("active", COLORS["accent_hover"]), ("disabled", "#a8c7bc")],
-        foreground=[("disabled", "#eef5f2"), ("!disabled", "#ffffff")],
-    )
-    style.configure("Ghost.TButton", background="#e6f1ed", foreground=COLORS["accent_text"], padding=(12, 7))
-    style.map("Ghost.TButton", background=[("active", COLORS["accent_soft"]), ("pressed", "#c9e2d8"), ("disabled", "#eef3f1")], foreground=[("disabled", "#9aa8a2")])
-    style.configure("Nav.TButton", anchor="w", padding=(16, 11), background=COLORS["shell"], foreground="#4f6058", borderwidth=0)
-    style.map(
-        "Nav.TButton",
-        background=[("selected", COLORS["accent_soft"]), ("active", "#e6edea")],
-        foreground=[("selected", COLORS["accent_text"])],
-    )
-
-    # Inputs
-    style.configure("TEntry", padding=8, fieldbackground="#ffffff", bordercolor=COLORS["field_border"], lightcolor="#ffffff", darkcolor="#ffffff", insertcolor=COLORS["text"])
-    style.map("TEntry", bordercolor=[("focus", COLORS["field_focus"])], lightcolor=[("focus", COLORS["field_focus"])], darkcolor=[("focus", COLORS["field_focus"])])
-    style.configure("TCombobox", padding=7, bordercolor=COLORS["field_border"], arrowsize=16, arrowcolor=COLORS["muted"], background="#ffffff", lightcolor="#ffffff", darkcolor="#ffffff")
-    style.map(
-        "TCombobox",
-        fieldbackground=[("readonly", "#ffffff"), ("!readonly", "#ffffff")],
-        selectbackground=[("readonly", "#ffffff")],
-        selectforeground=[("readonly", COLORS["text"])],
-        bordercolor=[("focus", COLORS["field_focus"])],
-        background=[("active", "#f3f6f5")],
-    )
-    style.layout(
-        "Vertical.TScrollbar",
-        [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [("Vertical.Scrollbar.thumb", {"expand": 1, "sticky": "nswe"})]})],
-    )
-    style.configure(
-        "Vertical.TScrollbar",
-        width=8,
-        gripcount=0,
-        background="#c9d4cf",
-        troughcolor="#ffffff",
-        bordercolor="#ffffff",
-        lightcolor="#c9d4cf",
-        darkcolor="#c9d4cf",
-        relief="flat",
-    )
-    style.map("Vertical.TScrollbar", background=[("active", "#aebcb6"), ("pressed", "#9aaba4")])
-    style.configure("Horizontal.TProgressbar", background=COLORS["accent"], troughcolor="#e7eeeb", borderwidth=0)
-
-    # Switches: drawn at the active Tk scale, images kept alive on the root.
-    switch_scale = float(root.tk.call("tk", "scaling")) / (96 / 72)
-    switch_width = max(34, round(38 * switch_scale))
-    switch_height = max(18, round(21 * switch_scale))
-    root._switch_images = []  # type: ignore[attr-defined]
-    for enabled in (False, True):
-        bitmap = Image.new("RGBA", (switch_width * 3, switch_height * 3), (255, 255, 255, 0))
-        draw = ImageDraw.Draw(bitmap)
-        width, height = bitmap.size
-        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=height // 2, fill=COLORS["accent"] if enabled else "#b6c2bd")
-        knob_x = width - height if enabled else 0
-        draw.ellipse((knob_x + 7, 7, knob_x + height - 8, height - 8), fill="#ffffff")
-        bitmap = bitmap.resize((switch_width, switch_height), Image.Resampling.LANCZOS)
-        padded = Image.new("RGBA", (switch_width + round(10 * switch_scale), switch_height), (255, 255, 255, 0))
-        padded.paste(bitmap, (0, 0))
-        root._switch_images.append(ImageTk.PhotoImage(padded, master=root))  # type: ignore[attr-defined]
-    style.element_create(
-        "Switch.indicator",
-        "image",
-        root._switch_images[0],  # type: ignore[attr-defined]
-        ("selected", root._switch_images[1]),  # type: ignore[attr-defined]
-        sticky="w",
-        border=0,
-    )
-    style.layout(
-        "Switch.TCheckbutton",
-        [
-            (
-                "Checkbutton.padding",
-                {
-                    "sticky": "nswe",
-                    "children": [
-                        ("Switch.indicator", {"side": "left", "sticky": "w"}),
-                        ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [("Checkbutton.label", {"sticky": "nswe"})]}),
-                    ],
-                },
-            )
-        ],
-    )
-    style.configure("Switch.TCheckbutton", padding=(0, 5), background=COLORS["card"], space=10)
-    style.map("Switch.TCheckbutton", background=[("active", COLORS["card"])])
+MICROPHONE_TEST_KEY = "microphone-test"
+SHORTCUT_TIP = "Tip: alt+z, ctrl+shift+space of een losse toets zoals insert of f9."
+STATUS_LABELS = {
+    "saved": ("Bewaard", "muted"),
+    "processing": ("Transcriberen…", ""),
+    "done": ("Getranscribeerd", ""),
+    "failed": ("Mislukt", "danger"),
+}
 
 
 # --------------------------------------------------------------------------
@@ -244,7 +91,11 @@ class SettingsController(Protocol):
     app_dir: str
     config: object
 
-    def list_input_devices(self) -> list[tuple[str, str]]: ...
+    def list_input_devices(self, *, refresh: bool = False) -> list[tuple[str, str]]: ...
+    def start_microphone_test(self, selector: str) -> None: ...
+    def microphone_test_status(self) -> MicrophoneTestStatus: ...
+    def play_microphone_test(self) -> float: ...
+    def stop_microphone_test(self) -> None: ...
     def autostart_enabled(self) -> bool: ...
     def apply_settings(self, new_config) -> None: ...
     def suspend_hotkey(self) -> None: ...
@@ -256,9 +107,9 @@ class SettingsController(Protocol):
     def retry_recording(self, recording_id: str) -> None: ...
     def play_recording(self, recording_id: str, offset: float = 0.0) -> float: ...
     def stop_playback(self) -> None: ...
+    def playback_status(self): ...
     def copy_text(self, text: str) -> None: ...
     def clear_history(self) -> None: ...
-    def test_sounds(self) -> None: ...
     def check_for_updates_manual(self) -> None: ...
     def open_log(self) -> None: ...
     def restart(self) -> None: ...
@@ -269,189 +120,293 @@ class SettingsController(Protocol):
 # --------------------------------------------------------------------------
 
 
-class Card(ttk.Frame):
-    """Bordered section with a title, optional description and a body frame."""
-
-    PADDING = (16, 12, 16, 14)
-
-    def __init__(self, parent, title: str, description: str | None = None) -> None:
-        super().__init__(parent, style="Card.TFrame", padding=self.PADDING)
-        self.columnconfigure(0, weight=1)
-        ttk.Label(self, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        next_row = 1
-        if description:
-            self.description = ttk.Label(self, text=description, style="CardMuted.TLabel", justify="left")
-            self.description.grid(row=1, column=0, sticky="w", pady=(2, 0))
-            self.bind("<Configure>", self._rewrap, add="+")
-            next_row = 2
-        self.body = ttk.Frame(self, style="CardBody.TFrame")
-        self.body.grid(row=next_row, column=0, sticky="nsew", pady=(10, 0))
-        self.body.columnconfigure(0, weight=1)
-        self.rowconfigure(next_row, weight=1)
-
-    def _rewrap(self, event) -> None:
-        horizontal_padding = self.PADDING[0] + self.PADDING[2] + 4
-        self.description.configure(wraplength=max(160, event.width - horizontal_padding))
-
-
-def bordered_text(parent, height: int) -> Text:
-    widget = Text(
-        parent,
-        height=height,
-        wrap="word",
-        relief="flat",
-        borderwidth=0,
-        highlightthickness=1,
-        highlightbackground=COLORS["field_border"],
-        highlightcolor=COLORS["field_focus"],
-        padx=10,
-        pady=8,
-        background="#ffffff",
-        foreground=COLORS["text"],
-        insertbackground=COLORS["text"],
-        undo=True,
-    )
-    return widget
-
-
 def format_clock(seconds: float) -> str:
     whole = max(0, int(seconds))
     return f"{whole // 60}:{whole % 60:02d}"
 
 
-class RecordingPlayer(Canvas):
+def label(text: str = "", name: str | None = None, *, wrap: bool = False, selectable: bool = False) -> QLabel:
+    widget = QLabel(text)
+    if name:
+        widget.setObjectName(name)
+    widget.setWordWrap(wrap)
+    if selectable:
+        widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    return widget
+
+
+def button(text: str, *, variant: str | None = None, glyph: str | None = None, role: str = "text") -> QPushButton:
+    widget = QPushButton(text)
+    if variant:
+        widget.setProperty("variant", variant)
+    if glyph:
+        icon_role = {"primary": "on_accent", "ghost": "accent_text"}.get(variant or "", role)
+        widget.setIcon(icon(glyph, icon_role, icon_role))
+        widget.setIconSize(QSize(16, 16))
+    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    # Focus rings only for keyboard users: a mouse click does not leave one behind.
+    widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    return widget
+
+
+def hbox(*widgets, spacing: int = 8, margins=(0, 0, 0, 0)) -> QHBoxLayout:
+    layout = QHBoxLayout()
+    layout.setSpacing(spacing)
+    layout.setContentsMargins(*margins)
+    for widget in widgets:
+        if widget is None:
+            layout.addStretch(1)
+        elif isinstance(widget, int):
+            layout.addSpacing(widget)
+        else:
+            layout.addWidget(widget)
+    return layout
+
+
+class ComboBox(QComboBox):
+    """Styled combo box that paints its own crisp chevron."""
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        theme = current_theme()
+        color = QColor(theme.muted if self.isEnabled() else theme.field_border)
+        size = 16
+        draw_glyph(painter, "chevron", QRectF(self.width() - size - 10, (self.height() - size) / 2, size, size), color)
+
+
+class Card(QFrame):
+    """Rounded section with a title, optional description and a body layout."""
+
+    def __init__(self, title: str, description: str | None = None) -> None:
+        super().__init__()
+        self.setObjectName("card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(4)
+        self.title = label(title, "cardTitle", wrap=True)
+        layout.addWidget(self.title)
+        self.description = None
+        if description:
+            self.description = label(description, "cardDescription", wrap=True)
+            layout.addWidget(self.description)
+        layout.addSpacing(8)
+        self.body = QVBoxLayout()
+        self.body.setSpacing(8)
+        layout.addLayout(self.body, 1)
+
+
+class ToggleSwitch(QAbstractButton):
+    """A Windows 11 style switch with its label, drawn at the native scale."""
+
+    TRACK_W = 40
+    TRACK_H = 20
+    GAP = 12
+
+    def __init__(self, text: str, checked: bool = False) -> None:
+        super().__init__()
+        self.setText(text)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._offset = 1.0 if checked else 0.0
+        self._animation = QVariantAnimation(self)
+        self._animation.setDuration(120)
+        self._animation.valueChanged.connect(self._set_offset)
+        self.toggled.connect(self._animate)
+
+    def _set_offset(self, value) -> None:
+        self._offset = float(value)
+        self.update()
+
+    def _animate(self, checked: bool) -> None:
+        self._animation.stop()
+        self._animation.setStartValue(self._offset)
+        self._animation.setEndValue(1.0 if checked else 0.0)
+        self._animation.start()
+
+    def sizeHint(self) -> QSize:
+        metrics = QFontMetrics(self.font())
+        return QSize(self.TRACK_W + self.GAP + metrics.horizontalAdvance(self.text()) + 6, max(30, metrics.height() + 10))
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def hitButton(self, pos) -> bool:
+        return self.rect().contains(pos)
+
+    def paintEvent(self, _event) -> None:
+        theme = current_theme()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        top = (self.height() - self.TRACK_H) / 2
+        track = QRectF(1, top, self.TRACK_W, self.TRACK_H)
+        on = QColor(theme.accent)
+        off = QColor(theme.field_border)
+        mix = self._offset
+        color = QColor(
+            round(off.red() + (on.red() - off.red()) * mix),
+            round(off.green() + (on.green() - off.green()) * mix),
+            round(off.blue() + (on.blue() - off.blue()) * mix),
+        )
+        if not self.isEnabled():
+            color.setAlpha(110)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(track, self.TRACK_H / 2, self.TRACK_H / 2)
+        if self.hasFocus():
+            painter.setPen(QColor(theme.field_focus))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(track.adjusted(-2.5, -2.5, 2.5, 2.5), self.TRACK_H / 2 + 2.5, self.TRACK_H / 2 + 2.5)
+        knob = self.TRACK_H - 6
+        x = track.left() + 3 + (self.TRACK_W - knob - 6) * mix
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(QRectF(x, top + 3, knob, knob))
+        painter.setPen(QColor(theme.text if self.isEnabled() else theme.muted))
+        text_rect = self.rect().adjusted(self.TRACK_W + self.GAP, 0, 0, 0)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+
+
+class RecordingPlayer(QWidget):
     """Compact audio player: play/pause button, seekable progress bar and time.
 
-    The widget only draws and reports clicks; the settings window owns the
+    The widget only draws and reports input; the settings window owns the
     playback state and calls :meth:`render` as the position changes.
     """
 
-    def __init__(self, parent, scale: float, duration: float, on_toggle, on_seek) -> None:
-        self.scale = scale
+    toggled = Signal()
+    seek_requested = Signal(float)
+
+    BUTTON = 30
+
+    def __init__(self, duration: float, parent=None) -> None:
+        super().__init__(parent)
         self.duration = max(0.0, duration)
-        self.on_toggle = on_toggle
-        self.on_seek = on_seek
         self.position = 0.0
         self.playing = False
         self.dragging = False
-        self.button_size = self.px(30)
-        super().__init__(
-            parent, width=self.px(160), height=self.px(34), background=COLORS["card"],
-            highlightthickness=0, borderwidth=0, cursor="hand2",
-        )
-        self.font = tkfont.Font(self, family=FONT_FAMILY, size=9)
-        self.time_width = self.font.measure(f"{format_clock(self.duration)} / {format_clock(self.duration)}".replace("1", "0"))
-        self.icons = {name: self._icon(name) for name in ("play", "pause")}
-        self.bind("<Configure>", lambda _event: self.render(self.position, self.playing))
-        self.bind("<ButtonPress-1>", self._press)
-        self.bind("<B1-Motion>", self._drag)
-        self.bind("<ButtonRelease-1>", self._release)
+        self.setMinimumWidth(200)
+        self.setFixedHeight(34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Opname afspelen")
 
-    def px(self, logical: float) -> int:
-        return max(1, round(logical * self.scale))
+    def _time_text(self) -> str:
+        return f"{format_clock(self.position)} / {format_clock(self.duration + 0.5)}"
 
-    def _icon(self, name: str) -> ImageTk.PhotoImage:
-        size = self.button_size
-        big = size * 4
-        bitmap = Image.new("RGBA", (big, big), (255, 255, 255, 0))
-        draw = ImageDraw.Draw(bitmap)
-        draw.ellipse((0, 0, big - 1, big - 1), fill=COLORS["accent"])
-        if name == "play":
-            draw.polygon(
-                [(big * 0.40, big * 0.30), (big * 0.40, big * 0.70), (big * 0.72, big * 0.50)], fill="#ffffff",
-            )
-        else:
-            for left in (0.35, 0.55):
-                draw.rounded_rectangle(
-                    (big * left, big * 0.31, big * (left + 0.10), big * 0.69), radius=big * 0.03, fill="#ffffff",
-                )
-        return ImageTk.PhotoImage(bitmap.resize((size, size), Image.Resampling.LANCZOS), master=self)
+    def _time_width(self) -> int:
+        sample = f"{format_clock(self.duration + 0.5)} / {format_clock(self.duration + 0.5)}".replace("1", "0")
+        return QFontMetrics(self.font()).horizontalAdvance(sample) + 4
 
-    def _track_bounds(self) -> tuple[int, int]:
-        start = self.button_size + self.px(14)
-        end = max(start + self.px(20), self.winfo_width() - self.time_width - self.px(16))
+    def _track_bounds(self) -> tuple[float, float]:
+        start = self.BUTTON + 14
+        end = max(start + 20, self.width() - self._time_width() - 14)
         return start, end
 
     def render(self, position: float, playing: bool) -> None:
         self.position = min(max(0.0, position), self.duration)
         self.playing = playing
-        self.delete("all")
-        middle = max(self.winfo_height(), self.winfo_reqheight()) // 2
-        self.create_image(0, middle, image=self.icons["pause" if playing else "play"], anchor="w")
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        theme = current_theme()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        middle = self.height() / 2
+        circle = QRectF(0, middle - self.BUTTON / 2, self.BUTTON, self.BUTTON)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.accent))
+        painter.drawEllipse(circle)
+        draw_glyph(painter, "pause" if self.playing else "play", circle.adjusted(7, 7, -7, -7), QColor(theme.on_accent))
         start, end = self._track_bounds()
         fraction = self.position / self.duration if self.duration else 0.0
         current = start + (end - start) * fraction
-        thickness = self.px(4)
-        self.create_line(start, middle, end, middle, fill=COLORS["field_border"], width=thickness, capstyle="round")
+        painter.setBrush(QColor(theme.field_border))
+        painter.drawRoundedRect(QRectF(start, middle - 2, end - start, 4), 2, 2)
         if current > start:
-            self.create_line(start, middle, current, middle, fill=COLORS["accent"], width=thickness, capstyle="round")
-        radius = self.px(6)
-        self.create_oval(current - radius, middle - radius, current + radius, middle + radius, fill=COLORS["accent"], outline="")
-        self.create_text(
-            self.winfo_width() - self.time_width, middle, anchor="w", fill=COLORS["muted"],
-            font=self.font, text=f"{format_clock(self.position)} / {format_clock(self.duration + 0.5)}",
+            painter.setBrush(QColor(theme.accent))
+            painter.drawRoundedRect(QRectF(start, middle - 2, current - start, 4), 2, 2)
+        painter.setBrush(QColor(theme.accent))
+        painter.drawEllipse(QRectF(current - 6, middle - 6, 12, 12))
+        if self.hasFocus():
+            painter.setPen(QColor(theme.field_focus))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(circle.adjusted(-2, -2, 2, 2))
+        painter.setPen(QColor(theme.muted))
+        painter.drawText(
+            QRectF(self.width() - self._time_width(), 0, self._time_width(), self.height()),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, self._time_text(),
         )
 
-    def _fraction(self, x: int) -> float:
+    def _fraction(self, x: float) -> float:
         start, end = self._track_bounds()
-        return min(1.0, max(0.0, (x - start) / max(1, end - start)))
+        return min(1.0, max(0.0, (x - start) / max(1.0, end - start)))
 
-    def _press(self, event) -> None:
-        if event.x <= self.button_size + self.px(4):
-            self.on_toggle()
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        x = event.position().x()
+        if x <= self.BUTTON + 4:
+            self.toggled.emit()
             return
         self.dragging = True
-        self._drag(event)
+        self.render(self._fraction(x) * self.duration, self.playing)
 
-    def _drag(self, event) -> None:
+    def mouseMoveEvent(self, event) -> None:
         if self.dragging:
-            self.render(self._fraction(event.x) * self.duration, self.playing)
+            self.render(self._fraction(event.position().x()) * self.duration, self.playing)
 
-    def _release(self, event) -> None:
+    def mouseReleaseEvent(self, event) -> None:
         if self.dragging:
             self.dragging = False
-            self.on_seek(self._fraction(event.x))
+            self.seek_requested.emit(self._fraction(event.position().x()))
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.toggled.emit()
+        elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and self.duration:
+            step = -5.0 if event.key() == Qt.Key.Key_Left else 5.0
+            self.seek_requested.emit(min(1.0, max(0.0, (self.position + step) / self.duration)))
+        else:
+            super().keyPressEvent(event)
 
 
-class ListEditor(ttk.Frame):
-    """Listbox + scrollbar + remove button, backed by a Python list."""
+class ListEditor(QWidget):
+    """List + counter + remove button, backed by a Python list."""
 
-    def __init__(self, parent, items: list, render, counter_text, on_change, *, height: int = 9) -> None:
-        super().__init__(parent, style="CardBody.TFrame")
+    def __init__(self, items: list, render, counter_text, on_change) -> None:
+        super().__init__()
         self.items = items
         self.render = render
         self.counter_text = counter_text
         self.on_change = on_change
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-
-        self.listbox = Listbox(self, height=height, exportselection=False)
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.listbox.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.listbox.configure(yscrollcommand=scrollbar.set)
-        self.listbox.bind("<Delete>", lambda _event: self.remove_selected())
-        self.listbox.bind("<BackSpace>", lambda _event: self.remove_selected())
-
-        toolbar = ttk.Frame(self, style="CardBody.TFrame")
-        toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        toolbar.columnconfigure(0, weight=1)
-        self.counter = ttk.Label(toolbar, text="", style="CardMuted.TLabel")
-        self.counter.grid(row=0, column=0, sticky="w")
-        self.remove_button = ttk.Button(toolbar, text="Verwijderen", style="Ghost.TButton", command=self.remove_selected)
-        self.remove_button.grid(row=0, column=1, sticky="e")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.listbox = QListWidget()
+        self.listbox.setMinimumHeight(140)
+        self.listbox.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self.listbox, 1)
+        self.counter = label("", "muted")
+        self.remove_button = button("Verwijderen", variant="ghost", glyph="trash")
+        self.remove_button.clicked.connect(self.remove_selected)
+        layout.addLayout(hbox(self.counter, None, self.remove_button))
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self.listbox, self.remove_selected, context=Qt.ShortcutContext.WidgetShortcut)
         self.refresh()
 
     def refresh(self, select_index: int | None = None) -> None:
-        self.listbox.delete(0, END)
+        self.listbox.clear()
         for item in self.items:
-            self.listbox.insert(END, self.render(item))
+            self.listbox.addItem(self.render(item))
         if select_index is not None and self.items:
-            index = min(select_index, len(self.items) - 1)
-            self.listbox.selection_set(index)
-            self.listbox.see(index)
-        self.remove_button.state(["!disabled"] if self.items else ["disabled"])
-        self.counter.configure(text=self.counter_text(len(self.items)))
+            self.listbox.setCurrentRow(min(select_index, len(self.items) - 1))
+        self.counter.setText(self.counter_text(len(self.items)))
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        self.remove_button.setEnabled(bool(self.items) and self.listbox.currentRow() >= 0)
 
     def append(self, item) -> None:
         self.items.append(item)
@@ -459,90 +414,68 @@ class ListEditor(ttk.Frame):
         self.on_change()
 
     def remove_selected(self) -> None:
-        selection = self.listbox.curselection()
-        if not selection:
+        index = self.listbox.currentRow()
+        if index < 0 or index >= len(self.items):
             return
-        index = int(selection[0])
         del self.items[index]
         self.refresh(index)
         self.on_change()
 
 
-class ScrollableFrame(ttk.Frame):
-    """Vertical scrolling container; ``self.inner`` holds the content."""
+QT_KEY_NAMES = {
+    Qt.Key.Key_Insert: "insert", Qt.Key.Key_Delete: "delete", Qt.Key.Key_Home: "home",
+    Qt.Key.Key_End: "end", Qt.Key.Key_PageUp: "page up", Qt.Key.Key_PageDown: "page down",
+    Qt.Key.Key_Left: "left", Qt.Key.Key_Right: "right", Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down",
+    Qt.Key.Key_Space: "space", Qt.Key.Key_Return: "enter", Qt.Key.Key_Enter: "enter",
+    Qt.Key.Key_Tab: "tab", Qt.Key.Key_Backtab: "tab", Qt.Key.Key_Backspace: "backspace",
+    Qt.Key.Key_Pause: "pause", Qt.Key.Key_Print: "print screen", Qt.Key.Key_ScrollLock: "scroll lock",
+    Qt.Key.Key_CapsLock: "caps lock", Qt.Key.Key_NumLock: "num lock", Qt.Key.Key_Menu: "apps",
+    Qt.Key.Key_Escape: "esc",
+    Qt.Key.Key_Control: "ctrl", Qt.Key.Key_Shift: "shift", Qt.Key.Key_Alt: "alt", Qt.Key.Key_Meta: "windows",
+    Qt.Key.Key_AltGr: "alt", Qt.Key.Key_Super_L: "windows", Qt.Key.Key_Super_R: "windows",
+}
 
-    def __init__(self, parent, background: str) -> None:
-        super().__init__(parent)
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-        self.canvas = Canvas(self, highlightthickness=0, borderwidth=0, background=background)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.scrollbar.grid(row=0, column=1, sticky="ns", padx=(6, 0))
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.inner = ttk.Frame(self.canvas)
-        self.inner.columnconfigure(0, weight=1)
-        self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        # Tk also fires <Leave> on the inner frame when the pointer moves into
-        # one of its children, so unbinding there would kill the wheel as soon
-        # as you hover a card. Claim the wheel on <Enter> instead and let the
-        # handler decide from the pointer position whether this canvas owns it.
-        for widget in (self.canvas, self.inner):
-            widget.bind("<Enter>", lambda _event: self._bind_wheel())
-        self.bind("<Destroy>", self._on_destroy)
 
-    def _on_inner_configure(self, _event) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self._update_scrollbar()
+def qt_key_name(key: int, keypad: bool = False) -> str:
+    try:
+        enum = Qt.Key(key)
+    except ValueError:
+        enum = None
+    if enum in QT_KEY_NAMES:
+        return QT_KEY_NAMES[enum]
+    if Qt.Key.Key_F1.value <= key <= Qt.Key.Key_F24.value:
+        return f"f{key - Qt.Key.Key_F1.value + 1}"
+    if 0x20 < key < 0x7F:
+        character = chr(key).lower()
+        return f"kp {character}" if keypad and character.isdigit() else character
+    return ""
 
-    def _on_canvas_configure(self, event) -> None:
-        self.canvas.itemconfigure(self.window_id, width=event.width)
-        self._update_scrollbar()
 
-    def _update_scrollbar(self) -> None:
-        needs_scroll = self.inner.winfo_reqheight() > self.canvas.winfo_height()
-        if needs_scroll:
-            self.scrollbar.grid()
-        else:
-            self.scrollbar.grid_remove()
-            self.canvas.yview_moveto(0)
+def hotkey_from_qt_event(event: QKeyEvent) -> str | None:
+    modifiers = event.modifiers()
+    return hotkey_from_key_press(
+        key_name=qt_key_name(event.key(), bool(modifiers & Qt.KeyboardModifier.KeypadModifier)),
+        virtual_key=int(event.nativeVirtualKey() or 0),
+        ctrl=bool(modifiers & Qt.KeyboardModifier.ControlModifier),
+        alt=bool(modifiers & Qt.KeyboardModifier.AltModifier),
+        shift=bool(modifiers & Qt.KeyboardModifier.ShiftModifier),
+        windows=bool(modifiers & Qt.KeyboardModifier.MetaModifier),
+    )
 
-    def _bind_wheel(self) -> None:
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
 
-    def _unbind_wheel(self) -> None:
-        self.canvas.unbind_all("<MouseWheel>")
+def ask(parent, title: str, question: str, confirm: str, cancel: str = "Annuleren") -> bool:
+    box = QMessageBox(QMessageBox.Icon.Question, title, question, parent=parent)
+    yes = box.addButton(confirm, QMessageBox.ButtonRole.AcceptRole)
+    box.addButton(cancel, QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(yes)
+    box.exec()
+    return box.clickedButton() is yes
 
-    def _on_destroy(self, event) -> None:
-        # Tk hands out the widget path as a string in some versions.
-        if str(event.widget) == str(self):
-            try:
-                self._unbind_wheel()
-            except Exception:
-                pass
 
-    def _pointer_over_canvas(self) -> bool:
-        """True when the mouse is over this canvas or anything inside it."""
-        try:
-            widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
-        except Exception:
-            return False
-        while widget is not None:
-            if widget is self.canvas:
-                return True
-            widget = getattr(widget, "master", None)
-        return False
-
-    def _on_wheel(self, event) -> None:
-        # Windows delivers <MouseWheel> to the focused widget, so the pointer
-        # position is the only reliable owner check.
-        if not self._pointer_over_canvas():
-            return
-        if self.inner.winfo_reqheight() <= self.canvas.winfo_height():
-            return
-        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+def show_error(parent, title: str, message: str) -> None:
+    box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=parent)
+    box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+    box.exec()
 
 
 # --------------------------------------------------------------------------
@@ -550,127 +483,165 @@ class ScrollableFrame(ttk.Frame):
 # --------------------------------------------------------------------------
 
 
-class SettingsWindow(Toplevel):
+class SettingsWindow(QWidget):
     PAGES = (
-        ("dictate", "Dicteren", "Jouw stem, direct op de juiste plek."),
-        ("history", "Geschiedenis", f"Je laatste {MAX_RECORDING_ENTRIES} opnames en {MAX_HISTORY_ENTRIES} transcripties."),
-        ("recognition", "Herkenning", "Help Groq jouw taal en context beter te begrijpen."),
-        ("dictionary", "Woordenboek", "Eigen namen, vaktermen en vaste correcties."),
-        ("connection", "Verbinding", "Je Groq API key en het transcriptiemodel."),
-        ("about", "Over", "Versie, updates en hulpmiddelen."),
+        ("dictate", "Dicteren", "Jouw stem, direct op de juiste plek.", "mic"),
+        ("history", "Geschiedenis", f"Je laatste {MAX_RECORDING_ENTRIES} opnames en {MAX_HISTORY_ENTRIES} transcripties.", "history"),
+        ("recognition", "Herkenning", "Help Groq jouw taal en context beter te begrijpen.", "sparkles"),
+        ("dictionary", "Woordenboek", "Eigen namen, vaktermen en vaste correcties.", "book"),
+        ("connection", "Verbinding", "Je Groq API key en het transcriptiemodel.", "key"),
+        ("about", "Over", "Versie, updates en hulpmiddelen.", "info"),
     )
-    # Logical (96-DPI) sizes; scaled with the display so text always fits.
-    WIDTH = 940
-    HEIGHT = 700
+    WIDTH = 980
+    HEIGHT = 780
     MIN_WIDTH = 900
-    MIN_HEIGHT = 660
+    MIN_HEIGHT = 600
 
-    def __init__(self, root: Tk, controller: SettingsController) -> None:
-        super().__init__(root)
+    closed = Signal()
+    _connection_result = Signal(str, bool)
+
+    def __init__(self, controller: SettingsController, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.WindowType.Window)
         self.controller = controller
         self.original = controller.config
-        self.scale = ui_scale(self)
-        self.title(f"{controller.app_name} instellingen")
-        self.minsize(self.px(self.MIN_WIDTH), self.px(self.MIN_HEIGHT))
-        self.resizable(True, True)
-        self.configure(background=COLORS["content"])
-        screen_width, screen_height = self.winfo_screenwidth(), self.winfo_screenheight()
-        width = min(self.px(self.WIDTH), max(320, screen_width - 40))
-        height = min(self.px(self.HEIGHT), max(240, screen_height - 120))
-        x = max(0, (screen_width - width) // 2)
-        y = max(0, (screen_height - height) // 2 - self.px(30))
-        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.setObjectName("settingsRoot")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(f"{controller.app_name} instellingen")
+        self.setWindowIcon(app_icon())
+        self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
 
         config = self.original
         self.dirty = False
         self.capturing = False
-        self.capture_bind_id: str | None = None
+        self.disposed = False
         self.api_key_visible = False
-        # (recording id, start offset, monotonic start, duration) while audio plays.
-        self.playback: tuple[str, float, float, float] | None = None
-        self.playback_after_id: str | None = None
+        self.current_page = ""
         self.playback_positions: dict[str, float] = {}
         self.players: dict[str, RecordingPlayer] = {}
-
-        # State that is edited by the pages and read back by save().
-        self.api_key = StringVar(value=config.api_key)
-        self.model = StringVar(value=config.model)
-        self.language = StringVar(value=config.language)
-        self.shortcut = StringVar(value=config.shortcut)
+        self.microphone_test_active = False
+        self.microphone_test_used = False
+        self._loading = True
         self.custom_words: list[str] = list(config.custom_words)
         self.word_replacements: list[tuple[str, str]] = list(config.word_replacements)
-        self.device_options = controller.list_input_devices()
-        self.device_labels = {device_id: label for device_id, label in self.device_options}
-        self.input_device = StringVar(value=self.device_labels.get(config.input_device, DEFAULT_DEVICE_LABEL))
-        self.paste = BooleanVar(value=config.paste_after_transcription)
-        self.remove_period = BooleanVar(value=config.remove_final_period)
-        self.autostart = BooleanVar(value=config.autostart or controller.autostart_enabled())
-        self.status = StringVar(value="Wijzigingen worden bewaard zodra je op Opslaan klikt.")
+
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setInterval(50)
+        self.playback_timer.timeout.connect(self._playback_tick)
+        self.microphone_timer = QTimer(self)
+        self.microphone_timer.setInterval(50)
+        self.microphone_timer.timeout.connect(self._microphone_tick)
+        self.microphone_playback_timer = QTimer(self)
+        self.microphone_playback_timer.setInterval(100)
+        self.microphone_playback_timer.timeout.connect(self._microphone_playback_tick)
+        self._connection_result.connect(self._show_connection_result)
 
         self._build_shell()
         self._build_pages()
+        self._load_devices(controller.list_input_devices(), config.input_device)
+        self._loading = False
         self.select_page("dictate" if config.api_key else "connection")
-        for variable in (self.api_key, self.model, self.language, self.shortcut, self.input_device, self.paste, self.remove_period, self.autostart):
-            variable.trace_add("write", lambda *_args: self.mark_dirty())
-        self.prompt_text.bind("<<Modified>>", self._on_prompt_modified)
+        self._place_on_screen()
+        self.stack.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.stack.setFocus()
 
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-        # Specific bindings win over the generic <KeyPress> capture binding, so
-        # route them back into the capture while it is listening.
-        self.bind("<Escape>", lambda event: self._capture_key(event) if self.capturing else self.cancel())
-        self.bind("<Control-s>", lambda event: self._capture_key(event) if self.capturing else self.save())
-
-    def px(self, logical: int) -> int:
-        return max(1, round(logical * self.scale))
+        QShortcut(QKeySequence.StandardKey.Save, self, self._save_shortcut)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self._escape_shortcut)
+        QApplication.instance().installEventFilter(self)
 
     # -- layout --------------------------------------------------------------
 
+    def _place_on_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        width = min(self.WIDTH, max(self.MIN_WIDTH, area.width() - 40))
+        height = min(self.HEIGHT, max(self.MIN_HEIGHT, area.height() - 60))
+        self.resize(width, height)
+        self.move(area.x() + (area.width() - width) // 2, area.y() + max(0, (area.height() - height) // 2 - 20))
+
     def _build_shell(self) -> None:
-        shell = ttk.Frame(self, style="Shell.TFrame")
-        shell.pack(fill="both", expand=True)
-        shell.columnconfigure(1, weight=1)
-        shell.rowconfigure(0, weight=1)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        sidebar = ttk.Frame(shell, style="Shell.TFrame", padding=(22, 26, 22, 22), width=self.px(232))
-        sidebar.grid(row=0, column=0, rowspan=2, sticky="ns")
-        sidebar.pack_propagate(False)
-        ttk.Label(sidebar, text="groq / dictation", style="Brand.TLabel").pack(anchor="w")
-        ttk.Label(sidebar, text="Van stem naar tekst", style="Side.TLabel").pack(anchor="w", pady=(2, 28))
-        self.navigation = ttk.Frame(sidebar, style="Shell.TFrame")
-        self.navigation.pack(fill="x")
-        ttk.Label(sidebar, text=f"Versie {self.controller.app_version}", style="Side.TLabel").pack(side="bottom", anchor="w")
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(224)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(18, 22, 18, 18)
+        side.setSpacing(4)
+        brand_icon = QLabel()
+        brand_icon.setPixmap(app_icon().pixmap(QSize(36, 36)))
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(0)
+        brand_text.addWidget(label("Groq Dictation", "brandTitle"))
+        brand_text.addWidget(label("Van stem naar tekst", "brandSubtitle"))
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        brand.addWidget(brand_icon)
+        brand.addLayout(brand_text, 1)
+        side.addLayout(brand)
+        side.addSpacing(22)
+        self.navigation = QVBoxLayout()
+        self.navigation.setSpacing(3)
+        side.addLayout(self.navigation)
+        side.addStretch(1)
+        side.addWidget(label(f"Versie {self.controller.app_version}", "sideVersion"))
+        root.addWidget(sidebar)
 
-        content = ttk.Frame(shell, padding=(32, 26, 32, 8))
-        content.grid(row=0, column=1, sticky="nsew")
-        content.columnconfigure(0, weight=1)
-        content.rowconfigure(2, weight=1)
-        self.page_title = StringVar()
-        self.page_subtitle = StringVar()
-        ttk.Label(content, textvariable=self.page_title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(content, textvariable=self.page_subtitle, style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 18))
-        self.page_host = ttk.Frame(content)
-        self.page_host.grid(row=2, column=0, sticky="nsew")
-        self.page_host.columnconfigure(0, weight=1)
-        self.page_host.rowconfigure(0, weight=1)
+        main = QVBoxLayout()
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+        header = QVBoxLayout()
+        header.setContentsMargins(34, 26, 34, 14)
+        header.setSpacing(2)
+        self.page_title = label("", "pageTitle")
+        self.page_subtitle = label("", "pageSubtitle", wrap=True)
+        header.addWidget(self.page_title)
+        header.addWidget(self.page_subtitle)
+        main.addLayout(header)
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("pageHost")
+        main.addWidget(self.stack, 1)
 
-        footer_wrap = ttk.Frame(shell, style="Footer.TFrame")
-        footer_wrap.grid(row=1, column=1, sticky="ew")
-        footer_wrap.columnconfigure(0, weight=1)
-        ttk.Separator(footer_wrap).grid(row=0, column=0, sticky="ew")
-        footer = ttk.Frame(footer_wrap, style="Footer.TFrame", padding=(32, 14, 32, 16))
-        footer.grid(row=1, column=0, sticky="ew")
-        footer.columnconfigure(0, weight=1)
-        self.status_label = ttk.Label(footer, textvariable=self.status, style="Status.TLabel", wraplength=self.px(400), justify="left")
-        self.status_label.grid(row=0, column=0, sticky="w")
-        buttons = ttk.Frame(footer, style="Footer.TFrame")
-        buttons.grid(row=0, column=1, sticky="e")
-        ttk.Button(buttons, text="Annuleren", command=self.cancel).pack(side="left", padx=(0, 8))
-        self.save_button = ttk.Button(buttons, text="Opslaan", style="Accent.TButton", command=self.save)
-        self.save_button.pack(side="left")
+        footer = QFrame()
+        footer.setObjectName("footer")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(34, 12, 34, 14)
+        footer_layout.setSpacing(8)
+        self.status_label = label("Wijzigingen worden bewaard zodra je op Opslaan klikt.", "status", wrap=True)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        footer_layout.addWidget(self.status_label, 1)
+        self.cancel_button = button("Annuleren")
+        self.cancel_button.clicked.connect(self.cancel)
+        self.save_button = button("Opslaan", variant="primary", glyph="check")
+        self.save_button.setDefault(True)
+        self.save_button.clicked.connect(self.save)
+        footer_layout.addWidget(self.cancel_button)
+        footer_layout.addWidget(self.save_button)
+        main.addWidget(footer)
+        root.addLayout(main, 1)
+
+    def _page(self, scroll: bool = True) -> tuple[QWidget, QVBoxLayout]:
+        body = QWidget()
+        body.setObjectName("pageBody")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(34, 4, 34, 22)
+        layout.setSpacing(12)
+        if not scroll:
+            return body, layout
+        area = QScrollArea()
+        area.setObjectName("pageScroll")
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setWidget(body)
+        return area, layout
 
     def _build_pages(self) -> None:
-        self.pages: dict[str, ttk.Frame] = {}
-        self.nav_buttons: dict[str, ttk.Button] = {}
+        self.pages: dict[str, QWidget] = {}
+        self.nav_buttons: dict[str, QPushButton] = {}
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
         builders = {
             "dictate": self._build_dictate_page,
             "history": self._build_history_page,
@@ -679,185 +650,241 @@ class SettingsWindow(Toplevel):
             "connection": self._build_connection_page,
             "about": self._build_about_page,
         }
-        for key, label, _subtitle in self.PAGES:
-            page = ttk.Frame(self.page_host)
-            page.grid(row=0, column=0, sticky="nsew")
-            page.columnconfigure(0, weight=1)
-            builders[key](page)
+        for key, text, _subtitle, glyph in self.PAGES:
+            page, layout = self._page(scroll=key != "history")
+            builders[key](layout)
+            self.stack.addWidget(page)
             self.pages[key] = page
-            button = ttk.Button(self.navigation, text=label, style="Nav.TButton", command=lambda k=key: self.select_page(k))
-            button.pack(fill="x", pady=2)
-            self.nav_buttons[key] = button
+            nav = QPushButton(text)
+            nav.setProperty("variant", "nav")
+            nav.setCheckable(True)
+            nav.setIcon(icon(glyph, "muted", "accent_text"))
+            nav.setIconSize(QSize(20, 20))
+            nav.setCursor(Qt.CursorShape.PointingHandCursor)
+            nav.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            nav.clicked.connect(lambda _checked=False, k=key: self.select_page(k))
+            self.nav_group.addButton(nav)
+            self.navigation.addWidget(nav)
+            self.nav_buttons[key] = nav
 
     def select_page(self, key: str) -> None:
-        for page_key, page in self.pages.items():
+        for page_key, text, subtitle, _glyph in self.PAGES:
             if page_key == key:
-                page.grid()
-            else:
-                page.grid_remove()
-            self.nav_buttons[page_key].state(["selected"] if page_key == key else ["!selected"])
-        for page_key, label, subtitle in self.PAGES:
-            if page_key == key:
-                self.page_title.set(label)
-                self.page_subtitle.set(subtitle)
+                self.stack.setCurrentWidget(self.pages[key])
+                self.nav_buttons[key].setChecked(True)
+                self.page_title.setText(text)
+                self.page_subtitle.setText(subtitle)
         self.current_page = key
 
     # -- pages ---------------------------------------------------------------
 
-    def _build_dictate_page(self, page: ttk.Frame) -> None:
+    def _build_dictate_page(self, page: QVBoxLayout) -> None:
+        config = self.original
         shortcut_card = Card(
-            page,
             "Shortcut",
             "Eenmaal drukken start de opname, nogmaals drukken stopt. De combinatie komt niet in je tekst terecht.",
         )
-        shortcut_card.grid(row=0, column=0, sticky="ew")
-        body = shortcut_card.body
-        body.columnconfigure(0, weight=1)
-        self.shortcut_entry = ttk.Entry(body, textvariable=self.shortcut, font=("Consolas", 11))
-        self.shortcut_entry.grid(row=0, column=0, sticky="ew")
-        self.capture_button = ttk.Button(body, text="Wijzig", command=self.toggle_capture)
-        self.capture_button.grid(row=0, column=1, padx=(10, 0))
-        self.shortcut_hint = ttk.Label(
-            body,
-            text="Tip: alt+z, ctrl+shift+space of een losse toets zoals insert of f9.",
-            style="CardMuted.TLabel",
+        self.shortcut_entry = QLineEdit(config.shortcut)
+        self.shortcut_entry.setObjectName("shortcutField")
+        self.shortcut_entry.textEdited.connect(lambda _text: self.mark_dirty())
+        self.capture_button = button("Wijzig", glyph="keyboard")
+        self.capture_button.clicked.connect(self.toggle_capture)
+        row = hbox(self.shortcut_entry, self.capture_button)
+        row.setStretch(0, 1)
+        shortcut_card.body.addLayout(row)
+        self.shortcut_hint = label(SHORTCUT_TIP, "hint", wrap=True)
+        shortcut_card.body.addWidget(self.shortcut_hint)
+        page.addWidget(shortcut_card)
+
+        mic_card = Card("Microfoon", "Standaard volgt de app de Windows-instelling voor opname.")
+        self.device_combo = ComboBox()
+        self.device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.device_combo.setMinimumContentsLength(18)
+        self.device_combo.currentIndexChanged.connect(self._device_changed)
+        self.refresh_devices_button = button("Vernieuwen", glyph="refresh")
+        self.refresh_devices_button.clicked.connect(self.refresh_devices)
+        self.microphone_test_button = button("Microfoon testen", glyph="mic")
+        self.microphone_test_button.clicked.connect(self.toggle_microphone_test)
+        row = hbox(self.device_combo, self.refresh_devices_button, self.microphone_test_button)
+        row.setStretch(0, 1)
+        mic_card.body.addLayout(row)
+        self.device_details_label = label("", "hint", wrap=True, selectable=True)
+        mic_card.body.addWidget(self.device_details_label)
+
+        self.microphone_panel = QWidget()
+        panel = QVBoxLayout(self.microphone_panel)
+        panel.setContentsMargins(0, 6, 0, 0)
+        panel.setSpacing(6)
+        self.microphone_level = QProgressBar()
+        self.microphone_level.setRange(0, 100)
+        self.microphone_level.setTextVisible(False)
+        self.microphone_listen_button = button("Terugluisteren", variant="ghost", glyph="play")
+        self.microphone_listen_button.setEnabled(False)
+        self.microphone_listen_button.clicked.connect(self.listen_microphone_test)
+        level_row = hbox(self.microphone_level, self.microphone_listen_button, spacing=12)
+        level_row.setStretch(0, 1)
+        panel.addLayout(level_row)
+        self.microphone_result_label = label("", "hint", wrap=True)
+        panel.addWidget(self.microphone_result_label)
+        self.microphone_panel.hide()
+        mic_card.body.addWidget(self.microphone_panel)
+        page.addWidget(mic_card)
+
+        behaviour_card = Card("Gedrag")
+        self.paste_switch = ToggleSwitch("Transcriptie automatisch plakken", config.paste_after_transcription)
+        self.remove_period_switch = ToggleSwitch("Punt aan het einde verwijderen", config.remove_final_period)
+        self.autostart_switch = ToggleSwitch(
+            "Start automatisch met Windows", config.autostart or self.controller.autostart_enabled(),
         )
-        self.shortcut_hint.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        for switch in (self.paste_switch, self.remove_period_switch, self.autostart_switch):
+            switch.toggled.connect(lambda _checked: self.mark_dirty())
+            behaviour_card.body.addWidget(switch)
+        page.addWidget(behaviour_card)
+        page.addStretch(1)
 
-        mic_card = Card(page, "Microfoon", "Standaard volgt de app de Windows-instelling voor opname.")
-        mic_card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        body = mic_card.body
-        body.columnconfigure(0, weight=1)
-        self.device_combo = ttk.Combobox(body, textvariable=self.input_device, values=[label for _, label in self.device_options], state="readonly")
-        self.device_combo.grid(row=0, column=0, sticky="ew")
-        ttk.Button(body, text="Vernieuwen", command=self.refresh_devices).grid(row=0, column=1, padx=(10, 0))
-        ttk.Button(body, text="Geluiden testen", command=self.controller.test_sounds).grid(row=0, column=2, padx=(8, 0))
-
-        behaviour_card = Card(page, "Gedrag")
-        behaviour_card.grid(row=2, column=0, sticky="ew", pady=(12, 0))
-        body = behaviour_card.body
-        ttk.Checkbutton(body, text="Transcriptie automatisch plakken", variable=self.paste, style="Switch.TCheckbutton").grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(body, text="Punt aan het einde verwijderen", variable=self.remove_period, style="Switch.TCheckbutton").grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(body, text="Start automatisch met Windows", variable=self.autostart, style="Switch.TCheckbutton").grid(row=2, column=0, sticky="w")
-
-    def _build_history_page(self, page: ttk.Frame) -> None:
-        page.rowconfigure(0, weight=1)
-        self.history_tabs = ttk.Notebook(page)
-        self.history_tabs.grid(row=0, column=0, sticky="nsew")
-        self.recording_scroller = ScrollableFrame(self.history_tabs, COLORS["content"])
-        self.history_tabs.add(self.recording_scroller, text="Opnames")
-        self.recording_host = self.recording_scroller.inner
-        self.history_scroller = ScrollableFrame(self.history_tabs, COLORS["content"])
-        self.history_tabs.add(self.history_scroller, text="Teksten")
-        self.history_host = self.history_scroller.inner
-
-        footer = ttk.Frame(page)
-        footer.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        footer.columnconfigure(0, weight=1)
-        ttk.Label(
-            footer,
-            text="Opnames blijven ook bij een fout bewaard. De oudste verdwijnen na 20 nieuwe opnames. Opnieuw proberen gebruikt je opgeslagen instellingen.",
-            style="Muted.TLabel",
-            wraplength=self.px(430),
-            justify="left",
-        ).grid(row=0, column=0, sticky="w")
-        self.clear_history_button = ttk.Button(footer, text="Geschiedenis wissen", command=self.clear_history)
-        self.clear_history_button.grid(row=0, column=1, sticky="e", padx=(12, 0))
+    def _build_history_page(self, page: QVBoxLayout) -> None:
+        self.history_tabs = QTabWidget()
+        self.history_tabs.setDocumentMode(True)
+        self.recording_scroller, self.recording_host = self._history_list()
+        self.history_scroller, self.history_host = self._history_list()
+        self.history_tabs.addTab(self.recording_scroller, icon("mic", "muted", "accent_text"), "Opnames")
+        self.history_tabs.addTab(self.history_scroller, icon("document", "muted", "accent_text"), "Teksten")
+        page.addWidget(self.history_tabs, 1)
+        note = label(
+            "Opnames blijven ook bij een fout bewaard. De oudste verdwijnen na 20 nieuwe opnames. "
+            "Opnieuw proberen gebruikt je opgeslagen instellingen.",
+            "muted", wrap=True,
+        )
+        self.clear_history_button = button("Geschiedenis wissen", glyph="trash")
+        self.clear_history_button.clicked.connect(self.clear_history)
+        footer = hbox(note, self.clear_history_button, spacing=16)
+        footer.setStretch(0, 1)
+        page.addLayout(footer)
         self.refresh_history()
+
+    def _history_list(self) -> tuple[QScrollArea, QVBoxLayout]:
+        host = QWidget()
+        host.setObjectName("historyList")
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 10, 6, 4)
+        layout.setSpacing(8)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setWidget(host)
+        return area, layout
+
+    @staticmethod
+    def _clear_layout(layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
 
     def refresh_history(self) -> None:
         """Refresh both lists after saving audio or changing a request's status."""
-        if not self.winfo_exists():
+        if self.disposed:
             return
-        for child in self.history_host.winfo_children():
-            child.destroy()
         entries = self.controller.history_entries()
         recordings = self.controller.recording_entries()
         busy = self.controller.recording_busy()
-        self.clear_history_button.state(["!disabled"] if (entries or recordings) and not busy else ["disabled"])
+        self.clear_history_button.setEnabled(bool(entries or recordings) and not busy)
         self.refresh_recordings(recordings, busy)
+        self._clear_layout(self.history_host)
         if not entries:
-            empty = Card(self.history_host, "Nog geen transcripties", "Dicteer iets met je shortcut. De tekst verschijnt hier zodra hij is geplakt.")
-            empty.grid(row=0, column=0, sticky="ew")
-            return
+            self.history_host.addWidget(Card(
+                "Nog geen transcripties",
+                "Dicteer iets met je shortcut. De tekst verschijnt hier zodra hij is geplakt.",
+            ))
+        for entry in entries:
+            card = QFrame()
+            card.setObjectName("card")
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(16, 10, 12, 12)
+            layout.setSpacing(6)
+            copy_button = button("Kopiëren", variant="ghost", glyph="copy")
+            copy_button.clicked.connect(lambda _checked=False, e=entry, b=copy_button: self.copy_history_entry(e, b))
+            layout.addLayout(hbox(label(entry.label(), "muted"), None, copy_button))
+            layout.addWidget(label(self._preview(entry.text), wrap=True, selectable=True))
+            self.history_host.addWidget(card)
+        self.history_host.addStretch(1)
 
-        for index, entry in enumerate(entries):
-            row = ttk.Frame(self.history_host, style="Card.TFrame", padding=(14, 10, 14, 12))
-            row.grid(row=index, column=0, sticky="ew", pady=(0 if index == 0 else 8, 0))
-            row.columnconfigure(0, weight=1)
-            ttk.Label(row, text=entry.label(), style="CardMuted.TLabel").grid(row=0, column=0, sticky="w")
-            copy_button = ttk.Button(row, text="Kopiëren", style="Ghost.TButton")
-            copy_button.configure(command=lambda e=entry, b=copy_button: self.copy_history_entry(e, b))
-            copy_button.grid(row=0, column=1, sticky="e")
-            lines = max(1, min(3, (len(entry.text) // 80) + 1 + entry.text.count("\n")))
-            text = bordered_text(row, height=lines)
-            text.insert("1.0", entry.text)
-            text.configure(state="disabled", cursor="arrow")
-            text.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+    @staticmethod
+    def _preview(text: str, limit: int = 600) -> str:
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
     def refresh_recordings(self, entries: tuple[RecordingEntry, ...], busy: bool) -> None:
-        for child in self.recording_host.winfo_children():
-            child.destroy()
+        self._clear_layout(self.recording_host)
         self.players = {}
-        if self.playback is not None and self.playback[0] not in {entry.id for entry in entries}:
+        status = self.controller.playback_status()
+        if status.key and status.key != MICROPHONE_TEST_KEY and status.key not in {entry.id for entry in entries}:
             self.stop_recording_playback()
         if not entries:
-            empty = Card(
-                self.recording_host, "Nog geen opnames",
-                "Nieuwe opnames worden hier bewaard, ook als de transcriptie mislukt.",
-            )
-            empty.grid(row=0, column=0, sticky="ew")
-            return
-        labels = {"saved": "Bewaard", "processing": "Transcriberen…", "done": "Getranscribeerd", "failed": "Mislukt"}
-        for index, entry in enumerate(entries):
-            row = ttk.Frame(self.recording_host, style="Card.TFrame", padding=(14, 10, 14, 12))
-            row.grid(row=index, column=0, sticky="ew", pady=(0 if index == 0 else 8, 0))
-            row.columnconfigure(0, minsize=self.px(110))
-            row.columnconfigure(1, weight=1)
-            ttk.Label(row, text=entry.label(), style="CardMuted.TLabel").grid(row=0, column=0, sticky="w")
-            player = RecordingPlayer(
-                row, self.scale, entry.duration,
-                on_toggle=lambda e=entry: self.toggle_recording_playback(e),
-                on_seek=lambda fraction, e=entry: self.seek_recording(e, fraction),
-            )
-            player.grid(row=0, column=1, sticky="ew", padx=(16, 0))
+            self.recording_host.addWidget(Card(
+                "Nog geen opnames", "Nieuwe opnames worden hier bewaard, ook als de transcriptie mislukt.",
+            ))
+        for entry in entries:
+            card = QFrame()
+            card.setObjectName("card")
+            grid = QGridLayout(card)
+            grid.setContentsMargins(16, 10, 12, 12)
+            grid.setHorizontalSpacing(14)
+            grid.setVerticalSpacing(6)
+            when = QVBoxLayout()
+            when.setSpacing(4)
+            when.addWidget(label(entry.label(), "muted"))
+            text, tone = STATUS_LABELS[entry.status]
+            badge = label(text, "badge")
+            if tone:
+                badge.setProperty("tone", tone)
+            when.addWidget(badge, 0, Qt.AlignmentFlag.AlignLeft)
+            grid.addLayout(when, 0, 0)
+            grid.setColumnMinimumWidth(0, 136)
+            player = RecordingPlayer(entry.duration)
+            player.toggled.connect(lambda e=entry: self.toggle_recording_playback(e))
+            player.seek_requested.connect(lambda fraction, e=entry: self.seek_recording(e, fraction))
+            grid.addWidget(player, 0, 1)
+            grid.setColumnStretch(1, 1)
             self.players[entry.id] = player
-            self.render_player(entry.id)
-            retry = ttk.Button(
-                row, text="Opnieuw transcriberen", style="Ghost.TButton",
-                command=lambda e=entry: self.retry_recording(e),
-            )
-            retry.grid(row=0, column=2, sticky="e", padx=(8, 0))
-            retry.state(["disabled"] if busy else ["!disabled"])
-            ttk.Label(row, text=labels[entry.status], style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+            retry = button("Opnieuw transcriberen", variant="ghost", glyph="retry")
+            retry.setEnabled(not busy)
+            retry.clicked.connect(lambda _checked=False, e=entry: self.retry_recording(e))
+            grid.addWidget(retry, 0, 2, Qt.AlignmentFlag.AlignTop)
+            row = 1
             if entry.text:
-                copy = ttk.Button(row, text="Kopiëren", style="Ghost.TButton")
-                copy.configure(command=lambda e=entry, b=copy: self.copy_history_entry(e, b))
-                copy.grid(row=1, column=2, sticky="e", pady=(4, 0))
-                text = bordered_text(row, height=2)
-                text.configure(width=20)  # Width follows the card, not 80 characters.
-                text.insert("1.0", entry.text)
-                text.configure(state="disabled", cursor="arrow")
-                text.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+                grid.addWidget(label(self._preview(entry.text), wrap=True, selectable=True), row, 0, 1, 2)
+                copy = button("Kopiëren", variant="ghost", glyph="copy")
+                copy.clicked.connect(lambda _checked=False, e=entry, b=copy: self.copy_history_entry(e, b))
+                grid.addWidget(copy, row, 2, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+                row += 1
             if entry.error:
-                ttk.Label(
-                    row, text=entry.error, style="CardMuted.TLabel", justify="left", wraplength=self.px(530),
-                ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+                grid.addWidget(label(entry.error, "danger", wrap=True, selectable=True), row, 0, 1, 3)
+            self.recording_host.addWidget(card)
+            self.render_player(entry.id, status)
+        self.recording_host.addStretch(1)
 
-    def playback_position(self, recording_id: str) -> float:
-        if self.playback is not None and self.playback[0] == recording_id:
-            _, offset, started, duration = self.playback
-            return min(duration, offset + time.monotonic() - started)
+    # -- playback ------------------------------------------------------------
+
+    def playback_position(self, recording_id: str, status=None) -> float:
+        status = status or self.controller.playback_status()
+        if status.key == recording_id and status.playing:
+            return status.position
         return self.playback_positions.get(recording_id, 0.0)
 
-    def render_player(self, recording_id: str) -> None:
+    def render_player(self, recording_id: str, status=None) -> None:
         player = self.players.get(recording_id)
-        if player is not None and player.winfo_exists() and not player.dragging:
-            playing = self.playback is not None and self.playback[0] == recording_id
-            player.render(self.playback_position(recording_id), playing)
+        if player is None or player.dragging:
+            return
+        status = status or self.controller.playback_status()
+        playing = status.key == recording_id and status.playing
+        player.render(self.playback_position(recording_id, status), playing)
 
     def toggle_recording_playback(self, entry: RecordingEntry) -> None:
-        if self.playback is not None and self.playback[0] == entry.id:
+        status = self.controller.playback_status()
+        if status.key == entry.id and status.playing:
             self.stop_recording_playback()
             return
         position = self.playback_positions.get(entry.id, 0.0)
@@ -865,7 +892,8 @@ class SettingsWindow(Toplevel):
 
     def seek_recording(self, entry: RecordingEntry, fraction: float) -> None:
         position = fraction * entry.duration
-        if self.playback is not None and self.playback[0] == entry.id and position < entry.duration - 0.05:
+        status = self.controller.playback_status()
+        if status.key == entry.id and status.playing and position < entry.duration - 0.05:
             self.start_recording_playback(entry, position)
             return
         self.playback_positions[entry.id] = position
@@ -873,42 +901,38 @@ class SettingsWindow(Toplevel):
 
     def start_recording_playback(self, entry: RecordingEntry, offset: float) -> None:
         self.stop_recording_playback()
+        self._stop_microphone_playback()
         try:
             self.controller.play_recording(entry.id, offset)
         except Exception as exc:
             self.set_status(f"Afspelen mislukt: {exc}")
             return
-        self.playback = (entry.id, offset, time.monotonic(), entry.duration)
+        self.playback_positions[entry.id] = offset
+        self.playback_timer.start()
         self._playback_tick()
 
     def stop_recording_playback(self) -> None:
         """Pause: keep the position so the next play resumes there."""
-        if self.playback_after_id is not None:
-            self.after_cancel(self.playback_after_id)
-            self.playback_after_id = None
-        if self.playback is None:
-            return
-        recording_id = self.playback[0]
-        self.playback_positions[recording_id] = self.playback_position(recording_id)
-        self.playback = None
-        self.render_player(recording_id)
-        try:
-            self.controller.stop_playback()
-        except Exception as exc:
-            self.set_status(f"Stoppen mislukt: {exc}")
+        status = self.controller.playback_status()
+        if status.key and status.key != MICROPHONE_TEST_KEY and status.playing:
+            self.playback_positions[status.key] = status.position
+            try:
+                self.controller.stop_playback()
+            except Exception as exc:
+                self.set_status(f"Stoppen mislukt: {exc}")
+        self.playback_timer.stop()
+        for recording_id in self.players:
+            self.render_player(recording_id)
 
     def _playback_tick(self) -> None:
-        # winsound cannot report progress, so the position follows the clock.
-        self.playback_after_id = None
-        if self.playback is None:
-            return
-        recording_id, _, _, duration = self.playback
-        if self.playback_position(recording_id) >= duration:
-            self.playback = None
-            self.playback_positions[recording_id] = 0.0
-        else:
-            self.playback_after_id = self.after(50, self._playback_tick)
-        self.render_player(recording_id)
+        status = self.controller.playback_status()
+        if status.key in self.players and not status.playing:
+            self.playback_positions[status.key] = 0.0 if status.finished else status.position
+            self.playback_timer.stop()
+        elif not status.playing:
+            self.playback_timer.stop()
+        for recording_id in self.players:
+            self.render_player(recording_id, status)
 
     def retry_recording(self, entry: RecordingEntry) -> None:
         try:
@@ -919,23 +943,25 @@ class SettingsWindow(Toplevel):
         self.refresh_history()
         self.set_status("Opnieuw transcriberen… De tekst komt op je klembord en in Geschiedenis.")
 
-    def copy_history_entry(self, entry: HistoryEntry, button: ttk.Button) -> None:
+    def copy_history_entry(self, entry: HistoryEntry, copy_button: QPushButton) -> None:
         try:
             self.controller.copy_text(entry.text)
         except Exception as exc:
             self.set_status(f"Kopiëren mislukt: {exc}")
             return
-        button.configure(text="Gekopieerd ✓")
+        copy_button.setText("Gekopieerd ✓")
         self.set_status("Transcriptie staat op je klembord.")
 
         def restore() -> None:
-            if button.winfo_exists():
-                button.configure(text="Kopiëren")
+            try:
+                copy_button.setText("Kopiëren")
+            except RuntimeError:
+                pass  # The list was rebuilt meanwhile.
 
-        self.after(1500, restore)
+        QTimer.singleShot(1500, copy_button, restore)
 
     def clear_history(self) -> None:
-        if not messagebox.askyesno(self.controller.app_name, "Alle bewaarde opnames en transcripties verwijderen?", parent=self):
+        if not ask(self, self.controller.app_name, "Alle bewaarde opnames en transcripties verwijderen?", "Verwijderen"):
             return
         self.stop_recording_playback()
         try:
@@ -944,213 +970,343 @@ class SettingsWindow(Toplevel):
             self.set_status(f"Geschiedenis wissen mislukt: {exc}")
             self.refresh_history()
             return
+        self.playback_positions.clear()
         self.refresh_history()
         self.set_status("Geschiedenis gewist.")
 
-    def _build_recognition_page(self, page: ttk.Frame) -> None:
-        language_card = Card(page, "Taal", "Een vaste taal maakt de herkenning sneller en betrouwbaarder. Laat leeg om Groq de taal te laten raden.")
-        language_card.grid(row=0, column=0, sticky="ew")
-        body = language_card.body
-        body.columnconfigure(0, weight=1)
-        language_values = [code for code, _ in LANGUAGE_OPTIONS if code]
-        self.language_combo = ttk.Combobox(body, textvariable=self.language, values=language_values)
-        self.language_combo.grid(row=0, column=0, sticky="ew")
-        self.language_hint = ttk.Label(body, text="", style="CardMuted.TLabel")
-        self.language_hint.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.language.trace_add("write", lambda *_args: self._update_language_hint())
+    # -- remaining pages -----------------------------------------------------
+
+    def _build_recognition_page(self, page: QVBoxLayout) -> None:
+        language_card = Card(
+            "Taal",
+            "Een vaste taal maakt de herkenning sneller en betrouwbaarder. Laat leeg om Groq de taal te laten raden.",
+        )
+        self.language_combo = ComboBox()
+        self.language_combo.setEditable(True)
+        self.language_combo.addItems([code for code, _ in LANGUAGE_OPTIONS if code])
+        self.language_combo.setEditText(self.original.language)
+        self.language_combo.editTextChanged.connect(self._language_changed)
+        self.language_combo.setMaximumWidth(260)
+        language_card.body.addWidget(self.language_combo)
+        self.language_hint = label("", "hint")
+        language_card.body.addWidget(self.language_hint)
+        page.addWidget(language_card)
         self._update_language_hint()
 
         prompt_card = Card(
-            page,
             "Prompt",
             "Optionele context voor Whisper, bijvoorbeeld het onderwerp of de schrijfstijl. "
             "Prompt en woordenboek delen samen ongeveer 224 tokens.",
         )
-        prompt_card.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
-        page.rowconfigure(1, weight=1)
-        body = prompt_card.body
-        body.rowconfigure(0, weight=1)
-        self.prompt_text = bordered_text(body, height=6)
-        self.prompt_text.grid(row=0, column=0, sticky="nsew")
-        self.prompt_text.insert("1.0", self.original.prompt)
-        self.prompt_text.edit_modified(False)
-        self.prompt_counter = ttk.Label(body, text="", style="CardMuted.TLabel")
-        self.prompt_counter.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.prompt_text = QPlainTextEdit(self.original.prompt)
+        self.prompt_text.setMinimumHeight(140)
+        self.prompt_text.setPlaceholderText("Bijvoorbeeld: Vergadering over de planning van het project Clinon.")
+        self.prompt_text.textChanged.connect(self._prompt_changed)
+        prompt_card.body.addWidget(self.prompt_text, 1)
+        self.prompt_counter = label("", "hint")
+        prompt_card.body.addWidget(self.prompt_counter)
+        page.addWidget(prompt_card, 1)
         self._update_prompt_counter()
 
-    def _build_dictionary_page(self, page: ttk.Frame) -> None:
-        page.columnconfigure(0, weight=1, uniform="dictionary")
-        page.columnconfigure(1, weight=1, uniform="dictionary")
-        page.rowconfigure(0, weight=1)
-
-        words_card = Card(
-            page,
-            "Woorden",
-            "Namen en vaktermen die Groq als spellinghint meekrijgt, zoals Groq of Clinon.",
-        )
-        words_card.grid(row=0, column=0, sticky="nsew")
-        body = words_card.body
-        body.rowconfigure(1, weight=1)
-        entry_row = ttk.Frame(body, style="CardBody.TFrame")
-        entry_row.grid(row=0, column=0, sticky="ew")
-        entry_row.columnconfigure(0, weight=1)
-        self.word_value = StringVar()
-        self.word_entry = ttk.Entry(entry_row, textvariable=self.word_value)
-        self.word_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(entry_row, text="Toevoegen", command=self.add_word).grid(row=0, column=1, padx=(8, 0))
-        self.word_entry.bind("<Return>", lambda _event: (self.add_word(), "break")[1])
+    def _build_dictionary_page(self, page: QVBoxLayout) -> None:
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        words_card = Card("Woorden", "Namen en vaktermen die Groq als spellinghint meekrijgt, zoals Groq of Clinon.")
+        self.word_entry = QLineEdit()
+        self.word_entry.setPlaceholderText("Nieuw woord")
+        self.word_entry.returnPressed.connect(self.add_word)
+        add_word = button("Toevoegen", glyph="plus")
+        add_word.clicked.connect(self.add_word)
+        row = hbox(self.word_entry, add_word)
+        row.setStretch(0, 1)
+        words_card.body.addLayout(row)
         self.words_editor = ListEditor(
-            body,
-            self.custom_words,
-            str,
-            lambda count: f"{count} van {MAX_CUSTOM_WORDS} woorden",
-            self.mark_dirty,
+            self.custom_words, str, lambda count: f"{count} van {MAX_CUSTOM_WORDS} woorden", self.mark_dirty,
         )
-        self.words_editor.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        words_card.body.addWidget(self.words_editor, 1)
+        columns.addWidget(words_card, 1)
 
         replacements_card = Card(
-            page,
-            "Vervangingen",
-            "Vaste correcties die na de transcriptie worden toegepast, bijvoorbeeld Grok → Groq.",
+            "Vervangingen", "Vaste correcties die na de transcriptie worden toegepast, bijvoorbeeld Grok → Groq.",
         )
-        replacements_card.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
-        body = replacements_card.body
-        body.rowconfigure(1, weight=1)
-        form = ttk.Frame(body, style="CardBody.TFrame")
-        form.grid(row=0, column=0, sticky="ew")
-        form.columnconfigure(1, weight=1)
-        self.source_value = StringVar()
-        self.target_value = StringVar()
-        ttk.Label(form, text="Verkeerd", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.source_entry = ttk.Entry(form, textvariable=self.source_value)
-        self.source_entry.grid(row=0, column=1, sticky="ew")
-        ttk.Label(form, text="Correct", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
-        target_entry = ttk.Entry(form, textvariable=self.target_value)
-        target_entry.grid(row=1, column=1, sticky="ew", pady=(6, 0))
-        ttk.Button(form, text="Toevoegen", command=self.add_replacement).grid(row=2, column=1, sticky="e", pady=(8, 0))
-        self.source_entry.bind("<Return>", lambda _event: (target_entry.focus_set(), "break")[1])
-        target_entry.bind("<Return>", lambda _event: (self.add_replacement(), "break")[1])
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        self.source_entry = QLineEdit()
+        self.source_entry.setPlaceholderText("Bijvoorbeeld Grok")
+        self.target_entry = QLineEdit()
+        self.target_entry.setPlaceholderText("Bijvoorbeeld Groq")
+        form.addWidget(label("Verkeerd"), 0, 0)
+        form.addWidget(self.source_entry, 0, 1)
+        form.addWidget(label("Correct"), 1, 0)
+        form.addWidget(self.target_entry, 1, 1)
+        add_replacement = button("Toevoegen", glyph="plus")
+        add_replacement.clicked.connect(self.add_replacement)
+        form.addWidget(add_replacement, 2, 1, Qt.AlignmentFlag.AlignRight)
+        form.setColumnStretch(1, 1)
+        self.source_entry.returnPressed.connect(self.target_entry.setFocus)
+        self.target_entry.returnPressed.connect(self.add_replacement)
+        replacements_card.body.addLayout(form)
         self.replacements_editor = ListEditor(
-            body,
-            self.word_replacements,
-            lambda pair: f"{pair[0]}  →  {pair[1]}",
-            lambda count: f"{count} van {MAX_WORD_REPLACEMENTS} vervangingen",
-            self.mark_dirty,
+            self.word_replacements, lambda pair: f"{pair[0]}  →  {pair[1]}",
+            lambda count: f"{count} van {MAX_WORD_REPLACEMENTS} vervangingen", self.mark_dirty,
         )
-        self.replacements_editor.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        replacements_card.body.addWidget(self.replacements_editor, 1)
+        columns.addWidget(replacements_card, 1)
+        page.addLayout(columns, 1)
 
-    def _build_connection_page(self, page: ttk.Frame) -> None:
+    def _build_connection_page(self, page: QVBoxLayout) -> None:
         key_card = Card(
-            page,
             "Groq API key",
             "Maak een sleutel aan op console.groq.com/keys. De sleutel wordt veilig opgeslagen in Windows Credential Manager.",
         )
-        key_card.grid(row=0, column=0, sticky="ew")
-        body = key_card.body
-        body.columnconfigure(0, weight=1)
-        self.api_key_entry = ttk.Entry(body, textvariable=self.api_key, show="•")
-        self.api_key_entry.grid(row=0, column=0, sticky="ew")
-        self.reveal_button = ttk.Button(body, text="Tonen", command=self.toggle_api_key_visibility)
-        self.reveal_button.grid(row=0, column=1, padx=(10, 0))
-        actions = ttk.Frame(body, style="CardBody.TFrame")
-        actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        actions.columnconfigure(1, weight=1)
-        self.test_button = ttk.Button(actions, text="Verbinding testen", style="Ghost.TButton", command=self.test_connection)
-        self.test_button.grid(row=0, column=0, sticky="w")
-        self.connection_result = ttk.Label(actions, text="", style="CardMuted.TLabel", wraplength=self.px(380), justify="left")
-        self.connection_result.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.api_key_entry = QLineEdit(self.original.api_key)
+        self.api_key_entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_entry.setPlaceholderText("gsk_…")
+        self.api_key_entry.textEdited.connect(lambda _text: self.mark_dirty())
+        self.reveal_button = button("Tonen", glyph="eye")
+        self.reveal_button.clicked.connect(self.toggle_api_key_visibility)
+        row = hbox(self.api_key_entry, self.reveal_button)
+        row.setStretch(0, 1)
+        key_card.body.addLayout(row)
+        self.test_button = button("Verbinding testen", variant="ghost", glyph="refresh")
+        self.test_button.clicked.connect(self.test_connection)
+        self.connection_result = label("", "hint", wrap=True)
+        result_row = hbox(self.test_button, self.connection_result, spacing=12)
+        result_row.setStretch(1, 1)
+        key_card.body.addLayout(result_row)
+        page.addWidget(key_card)
 
-        model_card = Card(page, "Model", "Beide modellen draaien bij Groq. Wissel gerust; je instellingen blijven verder gelijk.")
-        model_card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        body = model_card.body
-        body.columnconfigure(0, weight=1)
-        self.model_combo = ttk.Combobox(body, textvariable=self.model, values=[name for name, _ in MODEL_OPTIONS], state="readonly")
-        self.model_combo.grid(row=0, column=0, sticky="ew")
-        self.model_hint = ttk.Label(body, text="", style="CardMuted.TLabel", wraplength=self.px(540), justify="left")
-        self.model_hint.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.model.trace_add("write", lambda *_args: self._update_model_hint())
+        model_card = Card("Model", "Beide modellen draaien bij Groq. Wissel gerust; je instellingen blijven verder gelijk.")
+        self.model_combo = ComboBox()
+        names = [name for name, _ in MODEL_OPTIONS]
+        if self.original.model not in names:
+            names.append(self.original.model)
+        self.model_combo.addItems(names)
+        self.model_combo.setCurrentText(self.original.model)
+        self.model_combo.currentTextChanged.connect(self._model_changed)
+        self.model_combo.setMaximumWidth(360)
+        model_card.body.addWidget(self.model_combo)
+        self.model_hint = label("", "hint", wrap=True)
+        model_card.body.addWidget(self.model_hint)
+        page.addWidget(model_card)
+        page.addStretch(1)
         self._update_model_hint()
 
-    def _build_about_page(self, page: ttk.Frame) -> None:
+    def _build_about_page(self, page: QVBoxLayout) -> None:
         version_card = Card(
-            page,
             f"{self.controller.app_name} {self.controller.app_version}",
-            "Dicteer overal in Windows met Groq Whisper. Updates vervangen alleen de app; je sleutel en instellingen blijven staan.",
+            "Dicteer overal in Windows met Groq Whisper. Updates vervangen alleen de app; je sleutel, instellingen "
+            "en geschiedenis blijven staan.",
         )
-        version_card.grid(row=0, column=0, sticky="ew")
-        body = version_card.body
-        ttk.Button(body, text="Controleren op updates", command=self.controller.check_for_updates_manual).grid(row=0, column=0, sticky="w")
+        update_button = button("Controleren op updates", glyph="download")
+        update_button.clicked.connect(self.controller.check_for_updates_manual)
+        version_card.body.addLayout(hbox(update_button, None))
+        page.addWidget(version_card)
 
-        tools_card = Card(page, "Hulpmiddelen", "Handig als iets niet doet wat je verwacht.")
-        tools_card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        body = tools_card.body
-        row = ttk.Frame(body, style="CardBody.TFrame")
-        row.grid(row=0, column=0, sticky="w")
-        ttk.Button(row, text="Logbestand openen", command=self.controller.open_log).pack(side="left")
-        ttk.Button(row, text="App herstarten", command=self.controller.restart).pack(side="left", padx=(8, 0))
-        ttk.Label(
-            body,
-            text=f"Instellingen en logboek staan in {self.controller.app_dir}",
-            style="CardMuted.TLabel",
-            wraplength=self.px(540),
-            justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(12, 0))
+        tools_card = Card("Hulpmiddelen", "Handig als iets niet doet wat je verwacht.")
+        log_button = button("Logbestand openen", glyph="document")
+        log_button.clicked.connect(self.controller.open_log)
+        restart_button = button("App herstarten", glyph="power")
+        restart_button.clicked.connect(self.controller.restart)
+        tools_card.body.addLayout(hbox(log_button, restart_button, None))
+        tools_card.body.addWidget(label(
+            f"Instellingen en logboek staan in {self.controller.app_dir}", "hint", wrap=True, selectable=True,
+        ))
+        page.addWidget(tools_card)
+
+        credits = Card(
+            "Over deze app",
+            "Gebouwd met Python en Qt for Python (PySide6), gebruikt onder de LGPLv3. "
+            "De licentieteksten staan in de map licenses naast de app.",
+        )
+        page.addWidget(credits)
+        page.addStretch(1)
 
     # -- helpers -------------------------------------------------------------
 
     def mark_dirty(self) -> None:
-        if self.dirty:
+        if self._loading or self.dirty:
             return
         self.dirty = True
-        self.status.set("Je hebt niet-opgeslagen wijzigingen.")
-        self.status_label.configure(style="StatusDirty.TLabel")
+        self.set_status("Je hebt niet-opgeslagen wijzigingen.", dirty_style=True)
 
     def set_status(self, message: str, *, dirty_style: bool | None = None) -> None:
-        self.status.set(message)
+        self.status_label.setText(message)
         if dirty_style is not None:
-            self.status_label.configure(style="StatusDirty.TLabel" if dirty_style else "Status.TLabel")
+            self.status_label.setProperty("dirty", "true" if dirty_style else "false")
+            repolish(self.status_label)
 
-    def _on_prompt_modified(self, _event=None) -> None:
-        if self.prompt_text.edit_modified():
-            self.prompt_text.edit_modified(False)
-            self._update_prompt_counter()
-            self.mark_dirty()
+    def _prompt_changed(self) -> None:
+        self._update_prompt_counter()
+        self.mark_dirty()
 
     def prompt_value(self) -> str:
-        return self.prompt_text.get("1.0", "end-1c").strip()
+        return self.prompt_text.toPlainText().strip()
 
     def _update_prompt_counter(self) -> None:
         length = len(self.prompt_value())
-        self.prompt_counter.configure(text=f"{length} tekens" if length else "Nog geen prompt ingesteld.")
+        self.prompt_counter.setText(f"{length} tekens" if length else "Nog geen prompt ingesteld.")
+
+    def _language_changed(self, _text: str) -> None:
+        self._update_language_hint()
+        self.mark_dirty()
 
     def _update_language_hint(self) -> None:
-        code = self.language.get().strip().lower()
+        code = self.language_combo.currentText().strip().lower()
         names = dict(LANGUAGE_OPTIONS)
         if code in names:
-            self.language_hint.configure(text=names[code] if code else "Automatisch herkennen (iets trager).")
+            self.language_hint.setText(names[code] if code else "Automatisch herkennen (iets trager).")
         else:
-            self.language_hint.configure(text="ISO-taalcode, bijvoorbeeld nl, en of de.")
+            self.language_hint.setText("ISO-taalcode, bijvoorbeeld nl, en of de.")
+
+    def _model_changed(self, _text: str) -> None:
+        self._update_model_hint()
+        self.mark_dirty()
 
     def _update_model_hint(self) -> None:
-        self.model_hint.configure(text=dict(MODEL_OPTIONS).get(self.model.get(), ""))
+        self.model_hint.setText(dict(MODEL_OPTIONS).get(self.model_combo.currentText(), ""))
 
-    def refresh_devices(self) -> None:
-        current_label = self.input_device.get()
-        self.device_options = self.controller.list_input_devices()
-        self.device_labels = {device_id: label for device_id, label in self.device_options}
-        labels = [label for _, label in self.device_options]
-        self.device_combo.configure(values=labels)
-        if current_label not in labels:
-            self.input_device.set(DEFAULT_DEVICE_LABEL)
-        self.set_status(f"{max(0, len(labels) - 1)} microfoon(s) gevonden.")
+    # -- microphones ---------------------------------------------------------
+
+    def _load_devices(self, options: list[tuple[str, str]], selected: str) -> None:
+        self.device_options = list(options)
+        self.device_labels = {device_id: text for device_id, text in self.device_options}
+        if selected not in self.device_labels:
+            text = f"Niet beschikbaar: {selected.removeprefix('wasapi:')}"
+            self.device_options.append((selected, text))
+            self.device_labels[selected] = text
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        for device_id, text in self.device_options:
+            self.device_combo.addItem(text, device_id)
+            self.device_combo.setItemData(self.device_combo.count() - 1, text, Qt.ItemDataRole.ToolTipRole)
+        self.device_combo.setCurrentIndex(self.device_combo.findData(selected))
+        self.device_combo.blockSignals(False)
+        self._update_device_details()
 
     def selected_device_id(self) -> str:
-        selected = self.input_device.get()
-        for device_id, label in self.device_options:
-            if label == selected:
-                return device_id
-        prefix = selected.split(":", 1)[0]
-        return prefix if selected and prefix.isdigit() else ""
+        value = self.device_combo.currentData()
+        return value if isinstance(value, str) else ""
+
+    def selected_device_label(self) -> str:
+        return self.device_combo.currentText()
+
+    def _device_changed(self, _index: int) -> None:
+        self._update_device_details()
+        if self.microphone_test_used and not self.microphone_test_active:
+            self._close_microphone_test()
+            self.microphone_panel.hide()
+        self.mark_dirty()
+
+    def _update_device_details(self) -> None:
+        self.device_details_label.setText(f"Geselecteerd: {self.selected_device_label()}")
+        self.device_combo.setToolTip(self.selected_device_label())
+
+    def refresh_devices(self) -> None:
+        current_id = self.selected_device_id()
+        try:
+            options = self.controller.list_input_devices(refresh=True)
+        except Exception as exc:
+            self.set_status(f"Microfoons vernieuwen mislukt: {exc}")
+            return
+        self._load_devices(options, current_id)
+        self.set_status(f"{max(0, len(options) - 1)} microfoon(s) gevonden.", dirty_style=self.dirty)
+
+    def toggle_microphone_test(self) -> None:
+        if self.microphone_test_active:
+            self._close_microphone_test()
+            self.microphone_result_label.setText("Test gestopt.")
+            return
+        self.stop_recording_playback()
+        self._close_microphone_test()
+        self.refresh_devices()
+        self.microphone_panel.show()
+        self.microphone_listen_button.setEnabled(False)
+        self.microphone_test_used = True
+        try:
+            self.controller.start_microphone_test(self.selected_device_id())
+        except Exception as exc:
+            self.microphone_result_label.setText(f"Microfoon kon niet worden geopend: {exc}")
+            return
+        self.microphone_test_active = True
+        self.microphone_test_button.setText("Stop test")
+        self.microphone_test_button.setIcon(icon("stop", "danger", "danger"))
+        self.device_combo.setEnabled(False)
+        self.refresh_devices_button.setEnabled(False)
+        self.microphone_timer.start()
+        self._microphone_tick()
+
+    def _microphone_tick(self) -> None:
+        status = self.controller.microphone_test_status()
+        self.microphone_level.setValue(round(status.level * 100))
+        if status.state in ("opening", "recording"):
+            self.microphone_result_label.setText(
+                "Microfoon openen…" if status.state == "opening"
+                else f"Zeg een paar woorden… {min(status.elapsed, status.duration):.1f} / {status.duration:.0f} seconden"
+            )
+            return
+        self.microphone_timer.stop()
+        self.microphone_test_active = False
+        self.microphone_test_button.setText("Opnieuw testen")
+        self.microphone_test_button.setIcon(icon("mic"))
+        self.device_combo.setEnabled(True)
+        self.refresh_devices_button.setEnabled(True)
+        self.microphone_level.setValue(0)
+        if status.state == "ready":
+            self.microphone_listen_button.setEnabled(True)
+            self.microphone_result_label.setText(
+                "Geluid ontvangen. Luister je testopname terug."
+                if status.heard_audio else "Geen geluid gemeten. Controleer aansluiting, dempen en microfoonvolume."
+            )
+        elif status.state == "error":
+            self.microphone_result_label.setText(f"Microfoontest mislukt: {status.error}")
+        else:
+            self.microphone_result_label.setText("Test gestopt.")
+
+    def listen_microphone_test(self) -> None:
+        if self.microphone_playback_timer.isActive():
+            self._stop_microphone_playback()
+            return
+        self.stop_recording_playback()
+        try:
+            self.controller.play_microphone_test()
+        except Exception as exc:
+            self.microphone_result_label.setText(f"Terugluisteren mislukt: {exc}")
+            return
+        self.microphone_listen_button.setText("Stop afspelen")
+        self.microphone_listen_button.setIcon(icon("pause", "accent_text", "accent_text"))
+        self.microphone_playback_timer.start()
+
+    def _microphone_playback_tick(self) -> None:
+        status = self.controller.playback_status()
+        if status.key != MICROPHONE_TEST_KEY or not status.playing:
+            self._reset_microphone_listen_button()
+
+    def _reset_microphone_listen_button(self) -> None:
+        self.microphone_playback_timer.stop()
+        self.microphone_listen_button.setText("Terugluisteren")
+        self.microphone_listen_button.setIcon(icon("play", "accent_text", "accent_text"))
+
+    def _stop_microphone_playback(self) -> None:
+        if self.microphone_playback_timer.isActive():
+            if self.controller.playback_status().key == MICROPHONE_TEST_KEY:
+                self.controller.stop_playback()
+            self._reset_microphone_listen_button()
+
+    def _close_microphone_test(self) -> None:
+        self.microphone_timer.stop()
+        self._stop_microphone_playback()
+        if self.microphone_test_used:
+            self.controller.stop_microphone_test()
+        self.microphone_test_active = False
+        self.microphone_test_used = False
+        self.microphone_test_button.setText("Microfoon testen")
+        self.microphone_test_button.setIcon(icon("mic"))
+        self.microphone_listen_button.setEnabled(False)
+        self.device_combo.setEnabled(True)
+        self.refresh_devices_button.setEnabled(True)
+        self.microphone_level.setValue(0)
 
     # -- shortcut capture ----------------------------------------------------
 
@@ -1166,33 +1322,45 @@ class SettingsWindow(Toplevel):
             self.controller.suspend_hotkey()
         except Exception as exc:  # pragma: no cover - defensive
             self.set_status(f"Kon de huidige shortcut niet pauzeren: {exc}")
-        self.capture_button.configure(text="Luistert…")
-        self.shortcut_entry.state(["disabled"])
-        self.shortcut_hint.configure(text="Druk nu de gewenste toetscombinatie. Esc annuleert.")
+        self.capture_button.setText("Luistert…")
+        self.shortcut_entry.setReadOnly(True)
+        self.shortcut_entry.setProperty("capturing", "true")
+        repolish(self.shortcut_entry)
+        self.shortcut_hint.setText("Druk nu de gewenste toetscombinatie. Esc annuleert.")
         self.set_status("Druk nu op de gewenste shortcut. Esc annuleert.")
-        self.capture_bind_id = self.bind("<KeyPress>", self._capture_key, add="+")
-        self.focus_force()
+        self.activateWindow()
+        self.shortcut_entry.setFocus()
 
-    def _capture_key(self, event) -> str:
-        if event.keysym == "Escape":
+    def capture_key(self, event: QKeyEvent) -> bool:
+        """Handle a key while capturing; returns True when it was consumed."""
+        if event.key() == Qt.Key.Key_Escape and not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier:
             self.stop_capture(cancelled=True)
-            return "break"
-        value = hotkey_from_tk_event(event)
+            return True
+        value = hotkey_from_qt_event(event)
         if value is None:
-            return "break"
+            return True
         self.stop_capture(cancelled=False)
-        self.shortcut.set(value)
+        self.shortcut_entry.setText(value)
+        self.mark_dirty()
         self.set_status(f"Shortcut ingesteld op {value}. Klik op Opslaan om te bewaren.")
-        return "break"
+        return True
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if self.capturing and event.type() in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride):
+            if isinstance(watched, QWidget) and watched.window() is self:
+                if event.type() == QEvent.Type.ShortcutOverride:
+                    event.accept()
+                    return True
+                return self.capture_key(event)
+        return False
 
     def stop_capture(self, *, cancelled: bool) -> None:
-        if self.capture_bind_id is not None:
-            self.unbind("<KeyPress>", self.capture_bind_id)
-            self.capture_bind_id = None
         self.capturing = False
-        self.capture_button.configure(text="Wijzig")
-        self.shortcut_entry.state(["!disabled"])
-        self.shortcut_hint.configure(text="Tip: alt+z, ctrl+shift+space of een losse toets zoals insert of f9.")
+        self.capture_button.setText("Wijzig")
+        self.shortcut_entry.setReadOnly(False)
+        self.shortcut_entry.setProperty("capturing", "false")
+        repolish(self.shortcut_entry)
+        self.shortcut_hint.setText(SHORTCUT_TIP)
         try:
             self.controller.resume_hotkey()
         except Exception as exc:
@@ -1201,97 +1369,107 @@ class SettingsWindow(Toplevel):
         if cancelled:
             self.set_status("Shortcut wijzigen geannuleerd.")
 
+    def _save_shortcut(self) -> None:
+        if not self.capturing:
+            self.save()
+
+    def _escape_shortcut(self) -> None:
+        if not self.capturing:
+            self.cancel()
+
     # -- dictionary ----------------------------------------------------------
 
     def add_word(self) -> None:
         try:
-            word = normalize_custom_word(self.word_value.get())
+            word = normalize_custom_word(self.word_entry.text())
             if any(existing.casefold() == word.casefold() for existing in self.custom_words):
                 raise DictionaryValidationError(f"'{word}' staat al in het woordenboek.")
             candidate = normalize_custom_words([*self.custom_words, word])
             compose_transcription_prompt(self.prompt_value(), candidate)
         except DictionaryValidationError as exc:
-            messagebox.showerror(self.controller.app_name, str(exc), parent=self)
+            show_error(self, self.controller.app_name, str(exc))
             return
         self.words_editor.append(word)
-        self.word_value.set("")
-        self.word_entry.focus_set()
+        self.word_entry.clear()
+        self.word_entry.setFocus()
 
     def add_replacement(self) -> None:
         try:
-            source = normalize_replacement_part(self.source_value.get(), "verkeerd herkende")
-            target = normalize_replacement_part(self.target_value.get(), "correcte")
+            source = normalize_replacement_part(self.source_entry.text(), "verkeerd herkende")
+            target = normalize_replacement_part(self.target_entry.text(), "correcte")
             candidate = normalize_word_replacements([*self.word_replacements, (source, target)])
             if len(candidate) == len(self.word_replacements):
                 raise DictionaryValidationError(f"Voor '{source}' bestaat al een vervanging.")
         except DictionaryValidationError as exc:
-            messagebox.showerror(self.controller.app_name, str(exc), parent=self)
+            show_error(self, self.controller.app_name, str(exc))
             return
         self.replacements_editor.append((source, target))
-        self.source_value.set("")
-        self.target_value.set("")
-        self.source_entry.focus_set()
+        self.source_entry.clear()
+        self.target_entry.clear()
+        self.source_entry.setFocus()
 
     # -- connection ----------------------------------------------------------
 
     def toggle_api_key_visibility(self) -> None:
         self.api_key_visible = not self.api_key_visible
-        self.api_key_entry.configure(show="" if self.api_key_visible else "•")
-        self.reveal_button.configure(text="Verbergen" if self.api_key_visible else "Tonen")
+        self.api_key_entry.setEchoMode(QLineEdit.EchoMode.Normal if self.api_key_visible else QLineEdit.EchoMode.Password)
+        self.reveal_button.setText("Verbergen" if self.api_key_visible else "Tonen")
+        self.reveal_button.setIcon(icon("eye-off" if self.api_key_visible else "eye"))
+
+    def _set_connection_result(self, message: str, tone: str) -> None:
+        self.connection_result.setText(message)
+        self.connection_result.setObjectName(tone)
+        repolish(self.connection_result)
 
     def test_connection(self) -> None:
-        api_key = self.api_key.get().strip()
+        api_key = self.api_key_entry.text().strip()
         if not api_key:
-            self.connection_result.configure(text="Vul eerst een API key in.", style="CardDanger.TLabel")
+            self._set_connection_result("Vul eerst een API key in.", "danger")
             return
-        self.test_button.state(["disabled"])
-        self.connection_result.configure(text="Verbinden met Groq…", style="CardMuted.TLabel")
+        self.test_button.setEnabled(False)
+        self._set_connection_result("Verbinden met Groq…", "hint")
 
         def run() -> None:
             try:
-                message = self.controller.test_api_key(api_key)
-                style = "CardSuccess.TLabel"
+                message, ok = self.controller.test_api_key(api_key), True
             except Exception as exc:
-                message = f"Verbinding mislukt: {exc}"
-                style = "CardDanger.TLabel"
-
-            def show() -> None:
-                if not self.winfo_exists():
-                    return
-                self.test_button.state(["!disabled"])
-                self.connection_result.configure(text=message, style=style)
-
+                message, ok = f"Verbinding mislukt: {exc}", False
             try:
-                self.after(0, show)
-            except TclError:
-                # Window closed while the request was in flight.
-                pass
+                self._connection_result.emit(message, ok)
+            except RuntimeError:
+                pass  # Window closed while the request was in flight.
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run, name="groq-connection-test", daemon=True).start()
+
+    def _show_connection_result(self, message: str, ok: bool) -> None:
+        if self.disposed:
+            return
+        self.test_button.setEnabled(True)
+        self._set_connection_result(message, "success" if ok else "danger")
 
     # -- save / cancel -------------------------------------------------------
 
     def build_config(self):
-        normalized_shortcut = normalize_hotkey_text(self.shortcut.get()) or "insert"
+        normalized_shortcut = normalize_hotkey_text(self.shortcut_entry.text()) or "insert"
         validate_hotkey(normalized_shortcut)
         normalized_words = normalize_custom_words(self.custom_words)
         normalized_replacements = normalize_word_replacements(self.word_replacements)
         prompt = self.prompt_value()
         compose_transcription_prompt(prompt, normalized_words)
-        entered_api_key = self.api_key.get().strip()
+        entered_api_key = self.api_key_entry.text().strip()
         return dataclasses.replace(
             self.original,
             api_key=entered_api_key,
-            model=self.model.get().strip() or MODEL_OPTIONS[0][0],
-            language=self.language.get().strip().lower(),
+            model=self.model_combo.currentText().strip() or MODEL_OPTIONS[0][0],
+            language=self.language_combo.currentText().strip().lower(),
             prompt=prompt,
             custom_words=normalized_words,
             word_replacements=normalized_replacements,
             shortcut=normalized_shortcut,
             input_device=self.selected_device_id(),
-            paste_after_transcription=self.paste.get(),
-            remove_final_period=self.remove_period.get(),
-            autostart=self.autostart.get(),
+            paste_after_transcription=self.paste_switch.isChecked(),
+            remove_final_period=self.remove_period_switch.isChecked(),
+            autostart=self.autostart_switch.isChecked(),
             # If Credential Manager could not be read at startup, an unchanged
             # fallback value must not overwrite a newer secret. Deliberately
             # editing the field still authorizes the change.
@@ -1304,10 +1482,10 @@ class SettingsWindow(Toplevel):
         try:
             new_config = self.build_config()
         except (DictionaryValidationError, HotkeyError) as exc:
-            messagebox.showerror(self.controller.app_name, str(exc), parent=self)
+            show_error(self, self.controller.app_name, str(exc))
             return
         except Exception as exc:
-            messagebox.showerror(self.controller.app_name, f"Instellingen zijn ongeldig:\n{exc}", parent=self)
+            show_error(self, self.controller.app_name, f"Instellingen zijn ongeldig:\n{exc}")
             return
 
         try:
@@ -1316,34 +1494,47 @@ class SettingsWindow(Toplevel):
             # Everything except the shortcut was stored. Re-baseline on what is
             # now on disk, so closing does not offer to discard saved changes.
             self.original = self.controller.config
-            self.dirty = normalize_hotkey_text(self.shortcut.get()) != self.original.shortcut
+            self.dirty = normalize_hotkey_text(self.shortcut_entry.text()) != self.original.shortcut
             if self.dirty:
-                self.status.set("Alleen de shortcut is niet opgeslagen.")
-                self.status_label.configure(style="StatusDirty.TLabel")
+                self.set_status("Alleen de shortcut is niet opgeslagen.", dirty_style=True)
             else:
                 self.set_status("Instellingen zijn opgeslagen.", dirty_style=False)
             self.select_page("dictate")
-            messagebox.showerror(self.controller.app_name, str(exc), parent=self)
+            show_error(self, self.controller.app_name, str(exc))
             return
         except Exception as exc:
-            messagebox.showerror(self.controller.app_name, f"Instellingen konden niet worden opgeslagen:\n{exc}", parent=self)
+            show_error(self, self.controller.app_name, f"Instellingen konden niet worden opgeslagen:\n{exc}")
             return
 
         self.dirty = False
-        self.destroy()
-
-    def destroy(self) -> None:
-        if self.playback is not None:
-            self.stop_recording_playback()
-        super().destroy()
+        self.close()
 
     def cancel(self) -> None:
+        self.close()
+
+    def dispose(self) -> None:
+        """Release audio and the global key capture; safe to call twice."""
+        if self.disposed:
+            return
         if self.capturing:
             self.stop_capture(cancelled=True)
-        if self.dirty and not messagebox.askyesno(
-            self.controller.app_name,
-            "Je hebt wijzigingen die nog niet zijn opgeslagen. Wil je ze verwerpen?",
-            parent=self,
+        self._close_microphone_test()
+        self.stop_recording_playback()
+        self.playback_timer.stop()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self.disposed = True
+
+    def closeEvent(self, event) -> None:
+        if self.capturing:
+            self.stop_capture(cancelled=True)
+        if self.dirty and not ask(
+            self, self.controller.app_name,
+            "Je hebt wijzigingen die nog niet zijn opgeslagen. Wil je ze verwerpen?", "Verwerpen", "Blijven",
         ):
+            event.ignore()
             return
-        self.destroy()
+        self.dispose()
+        event.accept()
+        self.closed.emit()

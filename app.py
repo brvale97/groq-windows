@@ -1,1703 +1,635 @@
-import json
+import dataclasses
 import logging
-from logging.handlers import RotatingFileHandler
-import math
 import os
-import queue
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
-import wave
-import dataclasses
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-APP_VERSION = "0.1.25"
+from config_store import APP_VERSION
+
 if __name__ == "__main__" and "--version" in sys.argv:
     print(APP_VERSION)
     raise SystemExit(0)
 
-from tkinter import Canvas, StringVar, Tk, Toplevel, messagebox, ttk
-
-import keyring
-import numpy as np
-import pyautogui
-import pyperclip
-import pystray
-import sounddevice as sd
-import truststore
-
-# Use Windows' trusted certificate store. This keeps TLS verification enabled
-# while supporting managed networks that add a trusted inspection CA.
-truststore.inject_into_ssl()
-
-from groq import Groq
-from PIL import Image, ImageTk
-
-from dictation_core import (
-    append_trailing_space,
-    apply_final_period_preference,
-    apply_word_replacements,
-    compose_transcription_prompt,
-    normalize_custom_words,
-    normalize_word_replacements,
+import engine  # noqa: E402,F401 - enables the Windows certificate store before Groq loads
+import pyperclip  # noqa: E402
+import sounddevice as sd  # noqa: E402
+from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QPainter  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSystemTrayIcon,
+    QVBoxLayout,
+    QWidget,
 )
-from branding import draw_icon, write_icon
-from history import HistoryEntry, RecordingEntry, RecordingHistory, TranscriptionHistory
-from hotkeys import (  # noqa: F401 - re-exported for tests and tooling
-    HotkeyError,
-    HotkeyListener,
-    hotkey_from_tk_event,
-    normalize_hotkey_text,
-    normalize_tk_key,
-    validate_hotkey,
+
+import config_store  # noqa: E402
+import updater  # noqa: E402
+from audio_player import AudioPlayer, PlaybackStatus  # noqa: E402
+from config_store import APP_NAME, Config, load_config, save_config, setup_logging  # noqa: E402
+from dictation_core import DEFAULT_DEVICE_LABEL  # noqa: E402
+from engine import (  # noqa: E402
+    WAVE_BAR_COUNT,
+    WAVE_TICK_MS,
+    DictationEngine,
+    Groq,
+    ensure_sounds,
+    input_devices,
+    resolve_input_device,
+    smooth_audio_level,
+    stable_input_selector,
 )
-from settings_ui import SettingsWindow, apply_theme
+from history import HistoryEntry, RecordingEntry, RecordingHistory, TranscriptionHistory  # noqa: E402
+from hotkeys import HotkeyError, HotkeyListener  # noqa: E402
+from microphone_test import MicrophoneTest, MicrophoneTestStatus  # noqa: E402
+from settings_ui import MICROPHONE_TEST_KEY, SettingsWindow  # noqa: E402
+from ui_theme import app_icon, apply_theme, current_theme, draw_glyph  # noqa: E402
+from windows_services import (  # noqa: E402
+    acquire_single_instance_lock,
+    autostart_enabled,
+    release_single_instance_lock,
+    set_autostart,
+)
 
-try:
-    import winsound
-except ImportError:  # pragma: no cover - Windows-only nicety
-    winsound = None
-
-
-APP_NAME = "Groq Insert Dictation"
-APP_SLUG = "GroqInsertDictation"
-GITHUB_REPO = "brvale97/groq-windows"
-LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-KEYRING_SERVICE = APP_SLUG
-KEYRING_USER = "groq_api_key"
-_INSTANCE_MUTEX_HANDLE = None
-_INSTANCE_LOCK_FILE = None
-MIN_TRANSCRIPTION_SECONDS = 1.0
-MIN_TRANSCRIPTION_BYTES = 32_000
-POST_STOP_RECORDING_SECONDS = 0.15
-AUDIO_LEVEL_NOISE_FLOOR = 0.003
-AUDIO_LEVEL_FULL_SCALE = 0.25
-AUDIO_LEVEL_TIMEOUT_SECONDS = 0.25
-# Dictaphone-style waveform: each tick adds one bar on the right and older bars
-# scroll left, so the last ~0.7 s of speech stays visible.
-WAVE_BAR_COUNT = 11
-WAVE_TICK_MS = 60
-WAVE_ATTACK = 0.7  # Fraction of a rise shown per tick: speech appears almost immediately.
-WAVE_RELEASE = 0.6  # Per-tick decay after speech, a soft tail of roughly 0.2 s.
+BUBBLE_MARGIN = 12  # Room for the soft shadow around the pill.
+BUBBLE_BOTTOM_OFFSET = 28  # Distance from the taskbar / bottom of the work area.
+RECORD_RED = "#e5484d"
 WAVE_FADED_BARS = 4  # The oldest bars fade into the pill background.
-_SOUNDS_READY = False
-_SOUNDS_LOCK = threading.Lock()
-BUBBLE_COLORS = {
-    "idle": "#E81123",
-    "recording": "#ff2e3d",
-    "processing": "#E81123",
-}
 SPLASH_MIN_VISIBLE_MS = 900
 SPLASH_READY_VISIBLE_MS = 350
 SPLASH_TRAY_TIMEOUT_MS = 10_000
+NOTICE_VISIBLE_MS = 3000
 
 
-def app_data_dir() -> Path:
-    root = os.getenv("APPDATA")
-    if root:
-        return Path(root) / APP_SLUG
-    return Path.home() / f".{APP_SLUG}"
+def bottom_centered_position(width: int, height: int, area: QRect, bottom_offset: int = BUBBLE_BOTTOM_OFFSET) -> tuple[int, int]:
+    x = area.x() + max(0, (area.width() - width) // 2)
+    y = area.y() + max(0, area.height() - height - bottom_offset)
+    return x, y
 
 
-def centered_window_geometry(width: int, height: int, screen_width: int, screen_height: int) -> str:
-    x = max(0, (screen_width - width) // 2)
-    y = max(0, (screen_height - height) // 2)
-    return f"{width}x{height}+{x}+{y}"
-
-
-def bottom_centered_window_geometry(
-    width: int,
-    height: int,
-    screen_width: int,
-    screen_height: int,
-    bottom_margin: int = 82,
-) -> str:
-    x = max(0, (screen_width - width) // 2)
-    y = max(0, screen_height - height - bottom_margin)
-    return f"{width}x{height}+{x}+{y}"
-
-
-APP_DIR = app_data_dir()
-SETTINGS_PATH = APP_DIR / "settings.json"
-HISTORY_PATH = APP_DIR / "history.json"
-RECORDINGS_DIR = APP_DIR / "recordings"
-LOG_PATH = APP_DIR / "app.log"
-SOUNDS_DIR = APP_DIR / "sounds"
-PLAYBACK_DIR = Path(tempfile.gettempdir()) / f"{APP_SLUG}-playback"
-
-
-def setup_logging() -> None:
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    root_logger = logging.getLogger()
-    if any(getattr(handler, "_groq_dictation_handler", False) for handler in root_logger.handlers):
-        return
-
-    handler = RotatingFileHandler(
-        LOG_PATH,
-        maxBytes=2 * 1024 * 1024,
-        backupCount=2,
-        encoding="utf-8",
-    )
-    handler._groq_dictation_handler = True  # type: ignore[attr-defined]
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(handler)
-
-
-def acquire_single_instance_lock() -> bool:
+def process_age_ms() -> float | None:
+    """Milliseconds since this app was launched; includes a onefile bootloader."""
     if os.name != "nt":
-        return True
-
-    import ctypes
-    import ctypes.wintypes
-    import msvcrt
-
-    global _INSTANCE_MUTEX_HANDLE, _INSTANCE_LOCK_FILE
-
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = APP_DIR / "instance.lock"
-    _INSTANCE_LOCK_FILE = lock_path.open("a+b")
-    try:
-        _INSTANCE_LOCK_FILE.seek(0)
-        msvcrt.locking(_INSTANCE_LOCK_FILE.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        _INSTANCE_LOCK_FILE.close()
-        _INSTANCE_LOCK_FILE = None
-        return False
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.SetLastError.argtypes = [ctypes.wintypes.DWORD]
-    kernel32.SetLastError.restype = None
-    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
-    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
-
-    kernel32.SetLastError(0)
-    _INSTANCE_MUTEX_HANDLE = kernel32.CreateMutexW(None, True, f"Local\\{APP_SLUG}SingleInstance")
-    if not _INSTANCE_MUTEX_HANDLE:
-        _INSTANCE_LOCK_FILE.close()
-        _INSTANCE_LOCK_FILE = None
-        return False
-
-    if ctypes.get_last_error() == 183:
-        kernel32.CloseHandle(_INSTANCE_MUTEX_HANDLE)
-        _INSTANCE_MUTEX_HANDLE = None
-        _INSTANCE_LOCK_FILE.close()
-        _INSTANCE_LOCK_FILE = None
-        return False
-
-    return True
-
-
-def release_single_instance_lock() -> None:
-    """Hand the single-instance claim back so a successor can take it."""
-    global _INSTANCE_MUTEX_HANDLE, _INSTANCE_LOCK_FILE
-
-    if os.name != "nt":
-        return
-
-    import ctypes
-    import ctypes.wintypes
-    import msvcrt
-
-    if _INSTANCE_MUTEX_HANDLE is not None:
-        try:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.ReleaseMutex.argtypes = [ctypes.wintypes.HANDLE]
-            kernel32.ReleaseMutex.restype = ctypes.wintypes.BOOL
-            kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-            kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
-            kernel32.ReleaseMutex(_INSTANCE_MUTEX_HANDLE)
-            kernel32.CloseHandle(_INSTANCE_MUTEX_HANDLE)
-        except Exception as exc:
-            logging.warning("Could not release single-instance mutex: %s", exc)
-        _INSTANCE_MUTEX_HANDLE = None
-
-    if _INSTANCE_LOCK_FILE is not None:
-        try:
-            _INSTANCE_LOCK_FILE.seek(0)
-            msvcrt.locking(_INSTANCE_LOCK_FILE.fileno(), msvcrt.LK_UNLCK, 1)
-        except Exception as exc:
-            logging.warning("Could not unlock single-instance file: %s", exc)
-        try:
-            _INSTANCE_LOCK_FILE.close()
-        except Exception:
-            pass
-        _INSTANCE_LOCK_FILE = None
-
-
-@dataclass
-class Config:
-    api_key: str = ""
-    model: str = "whisper-large-v3-turbo"
-    language: str = "nl"
-    prompt: str = ""
-    custom_words: tuple[str, ...] = ()
-    word_replacements: tuple[tuple[str, str], ...] = ()
-    shortcut: str = "insert"
-    input_device: str = ""
-    sample_rate: int = 16_000
-    channels: int = 1
-    paste_after_transcription: bool = True
-    remove_final_period: bool = False
-    autostart: bool = True
-    keyring_read_succeeded: bool = field(default=True, repr=False, compare=False)
-
-
-def load_dotenv_values(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
-
-def try_read_api_key_from_keyring() -> tuple[bool, str]:
-    try:
-        return True, keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or ""
-    except Exception as exc:
-        logging.warning("Could not read API key from keyring: %s", exc)
-        return False, ""
-
-
-def write_api_key_to_keyring(api_key: str) -> bool:
-    try:
-        if api_key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, api_key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-        return True
-    except Exception as exc:
-        logging.warning("Could not write API key to keyring: %s", exc)
-        return False
-
-
-def positive_int(value, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def load_config() -> Config:
-    data: dict = {}
-    if SETTINGS_PATH.exists():
-        try:
-            loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-            else:
-                logging.warning("Ignoring settings file because its root is not an object.")
-        except (OSError, json.JSONDecodeError) as exc:
-            logging.warning("Ignoring invalid settings file: %s", exc)
-
-    env = load_dotenv_values(Path(".env"))
-    raw_custom_words = data.get("custom_words", ())
-    if not isinstance(raw_custom_words, (list, tuple)):
-        raw_custom_words = ()
-    raw_word_replacements = data.get("word_replacements", ())
-    if not isinstance(raw_word_replacements, (list, tuple)):
-        raw_word_replacements = ()
-    keyring_read_succeeded, keyring_api_key = try_read_api_key_from_keyring()
-    config = Config(
-        api_key="",
-        model=str(data.get("model") or env.get("GROQ_MODEL") or "whisper-large-v3-turbo"),
-        language=str(data.get("language") if data.get("language") is not None else env.get("GROQ_LANGUAGE", "nl")),
-        prompt=str(data.get("prompt") if data.get("prompt") is not None else env.get("GROQ_PROMPT", "")),
-        custom_words=normalize_custom_words(raw_custom_words, strict=False),
-        word_replacements=normalize_word_replacements(raw_word_replacements, strict=False),
-        shortcut=str(data.get("shortcut") or env.get("DICTATION_SHORTCUT") or "insert"),
-        input_device=str(
-            data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", "")
-        ),
-        sample_rate=positive_int(data.get("sample_rate") or env.get("DICTATION_SAMPLE_RATE"), 16_000),
-        channels=positive_int(data.get("channels") or env.get("DICTATION_CHANNELS"), 1),
-        paste_after_transcription=bool(
-            data.get("paste_after_transcription")
-            if "paste_after_transcription" in data
-            else env.get("PASTE_AFTER_TRANSCRIPTION", "true").lower() in {"1", "true", "yes", "on"}
-        ),
-        remove_final_period=bool(data.get("remove_final_period", False)),
-        autostart=bool(data.get("autostart", True)),
-        keyring_read_succeeded=keyring_read_succeeded,
-    )
-
-    config.api_key = (
-        keyring_api_key
-        or data.get("api_key", "")
-        or env.get("GROQ_API_KEY", "")
-        or os.getenv("GROQ_API_KEY", "")
-    ).strip()
-    return config
-
-
-def save_config(config: Config, *, allow_keyring_mutation: bool | None = None) -> None:
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    if allow_keyring_mutation is None:
-        allow_keyring_mutation = config.keyring_read_succeeded
-    data = asdict(config)
-    api_key = data.pop("api_key", "")
-    data.pop("keyring_read_succeeded", None)
-    if allow_keyring_mutation:
-        keyring_available, stored_api_key = try_read_api_key_from_keyring()
-    else:
-        keyring_available, stored_api_key = False, ""
-    should_write_keyring = (
-        allow_keyring_mutation
-        and bool(api_key)
-        and (not keyring_available or stored_api_key != api_key)
-    )
-    should_delete_keyring = (
-        allow_keyring_mutation
-        and not api_key
-        and (not keyring_available or bool(stored_api_key))
-    )
-    if (should_write_keyring or should_delete_keyring) and not write_api_key_to_keyring(api_key):
-        if api_key:
-            data["api_key"] = api_key
-    elif not allow_keyring_mutation and api_key:
-        # Preserve a legacy/settings fallback until a later startup can verify
-        # Credential Manager. It may be the only recoverable copy of the key.
-        data["api_key"] = api_key
-    serialized = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    if SETTINGS_PATH.exists() and SETTINGS_PATH.read_text(encoding="utf-8") == serialized:
-        return
-
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=APP_DIR,
-            prefix="settings-",
-            suffix=".tmp",
-            delete=False,
-        ) as temp:
-            temp.write(serialized)
-            temp.flush()
-            os.fsync(temp.fileno())
-            temp_path = Path(temp.name)
-        os.replace(temp_path, SETTINGS_PATH)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-
-# Prefixes that are swapped for an environment variable so generated scripts
-# stay ASCII even when the Windows user name contains accented characters.
-ENV_PATH_VARIABLES = ("LOCALAPPDATA", "APPDATA", "USERPROFILE")
-
-
-def path_with_env_var(path: Path | str, style: str = "cmd") -> str:
-    """Render *path* with a %VAR% / $Env:VAR prefix when one applies."""
-    text = str(path)
-    for name in ENV_PATH_VARIABLES:
-        base = (os.getenv(name) or "").rstrip("\\/")
-        if not base or len(text) <= len(base):
-            continue
-        if text[: len(base)].lower() != base.lower() or text[len(base)] not in "\\/":
-            continue
-        remainder = text[len(base) :]
-        return f"$Env:{name}{remainder}" if style == "powershell" else f"%{name}%{remainder}"
-    return text
-
-
-def cmd_script_encoding() -> str:
-    """cmd.exe reads batch files in the console OEM code page, not in UTF-8."""
-    if os.name != "nt":
-        return "utf-8"
+        return None
     try:
         import ctypes
+        from ctypes import wintypes
 
-        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.GetSystemTimeAsFileTime.argtypes = [ctypes.POINTER(wintypes.FILETIME)]
+
+        def created(handle) -> int:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return 0
+            return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+
+        start = created(kernel32.GetCurrentProcess())
+        if updater.install_layout() == "onefile":
+            parent = kernel32.OpenProcess(0x1000, False, os.getppid())  # PROCESS_QUERY_LIMITED_INFORMATION
+            if parent:
+                try:
+                    parent_start = created(parent)
+                    if parent_start:
+                        start = min(start, parent_start)
+                finally:
+                    kernel32.CloseHandle(parent)
+        now = wintypes.FILETIME()
+        kernel32.GetSystemTimeAsFileTime(ctypes.byref(now))
+        current = (now.dwHighDateTime << 32) | now.dwLowDateTime
+        return (current - start) / 10_000 if start else None
     except Exception:
-        return "mbcs"
-
-
-def cmd_script_bytes(lines: list[str]) -> bytes:
-    text = "\r\n".join(lines)
-    try:
-        return text.encode(cmd_script_encoding())
-    except (LookupError, UnicodeEncodeError):
-        # Better a path cmd.exe may mangle than no script at all.
-        return text.encode("utf-8", errors="replace")
-
-
-def startup_cmd_path() -> Path:
-    return (
-        Path(os.getenv("APPDATA", str(Path.home())))
-        / "Microsoft"
-        / "Windows"
-        / "Start Menu"
-        / "Programs"
-        / "Startup"
-        / f"{APP_SLUG}.cmd"
-    )
-
-
-def current_launch_command() -> str:
-    if getattr(sys, "frozen", False):
-        return f'start "" "{path_with_env_var(sys.executable)}"'
-
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    launcher = pythonw if pythonw.exists() else Path(sys.executable)
-    return f'start "" "{path_with_env_var(launcher)}" "{path_with_env_var(Path(__file__).resolve())}"'
-
-
-def set_autostart(enabled: bool) -> None:
-    path = startup_cmd_path()
-    if enabled:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = cmd_script_bytes(["@echo off", current_launch_command(), ""])
-        if not path.exists() or path.read_bytes() != content:
-            path.write_bytes(content)
-    else:
-        path.unlink(missing_ok=True)
-
-
-def autostart_enabled() -> bool:
-    return startup_cmd_path().exists()
-
-
-@dataclass(frozen=True)
-class UpdateInfo:
-    version: str
-    tag: str
-    url: str
-    asset_name: str
-    download_url: str
-
-
-def parse_version(value: str) -> tuple[int, ...]:
-    clean = value.strip().lower().lstrip("v")
-    parts: list[int] = []
-    for part in clean.split("."):
-        digits = "".join(char for char in part if char.isdigit())
-        parts.append(int(digits or "0"))
-    return tuple(parts)
-
-
-def is_newer_version(candidate: str, current: str = APP_VERSION) -> bool:
-    left = parse_version(candidate)
-    right = parse_version(current)
-    max_len = max(len(left), len(right))
-    return left + (0,) * (max_len - len(left)) > right + (0,) * (max_len - len(right))
-
-
-def fetch_latest_update() -> UpdateInfo | None:
-    request = urllib.request.Request(
-        LATEST_RELEASE_API,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": APP_SLUG,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=12) as response:
-        release = json.loads(response.read().decode("utf-8"))
-
-    tag = str(release.get("tag_name", "")).strip()
-    if not tag or not is_newer_version(tag):
         return None
 
-    assets = release.get("assets") or []
-    for asset in assets:
-        name = str(asset.get("name", ""))
-        if name.lower() == f"{APP_SLUG}.exe".lower():
-            download_url = str(asset.get("browser_download_url", ""))
-            if download_url:
-                return UpdateInfo(
-                    version=tag.lstrip("v"),
-                    tag=tag,
-                    url=str(release.get("html_url", "")),
-                    asset_name=name,
-                    download_url=download_url,
-                )
 
-    return None
+class EngineBridge(QObject):
+    """Moves engine callbacks from worker threads to the GUI thread."""
 
+    status = Signal(str)
+    state = Signal(str)
+    recordings_changed = Signal()
+    invoke = Signal(object)
 
-def download_update(update: UpdateInfo) -> Path:
-    update_dir = APP_DIR / "updates"
-    update_dir.mkdir(parents=True, exist_ok=True)
-    destination = update_dir / f"{APP_SLUG}-{update.tag}.exe"
-    partial = destination.with_suffix(".exe.part")
-    request = urllib.request.Request(
-        update.download_url,
-        headers={"User-Agent": APP_SLUG},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-            expected_length = response.headers.get("Content-Length")
-            downloaded = 0
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                output.write(chunk)
-                downloaded += len(chunk)
-            output.flush()
-            os.fsync(output.fileno())
+    def __init__(self) -> None:
+        super().__init__()
+        self.invoke.connect(lambda function: function())
 
-        if expected_length is not None and downloaded != int(expected_length):
-            raise RuntimeError(f"Onvolledige update-download: {downloaded} van {expected_length} bytes ontvangen.")
-        with partial.open("rb") as downloaded_file:
-            header = downloaded_file.read(2)
-        if downloaded < 1024 or header != b"MZ":
-            raise RuntimeError("Het gedownloade updatebestand is geen geldige Windows-app.")
-        os.replace(partial, destination)
-    finally:
-        partial.unlink(missing_ok=True)
-    return destination
+    def run_on_main(self, function) -> None:
+        self.invoke.emit(function)
 
 
-def current_exe_path() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable)
-    return Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "Programs" / APP_SLUG / f"{APP_SLUG}.exe"
-
-
-def launch_update_script(downloaded_exe: Path) -> None:
-    target = current_exe_path()
-    current_pid = os.getpid()
-    log_path = APP_DIR / "update.log"
-    ps_script = APP_DIR / "apply-update.ps1"
-    cmd_script = APP_DIR / "apply-update.cmd"
-    ps_script.write_text(
-        "\n".join(
-            [
-                "$ErrorActionPreference = 'Stop'",
-                f"$Source = '{str(downloaded_exe).replace("'", "''")}'",
-                f"$Target = '{str(target).replace("'", "''")}'",
-                f"$Log = '{str(log_path).replace("'", "''")}'",
-                "$Backup = \"$Target.bak\"",
-                "$Staged = \"$Target.new\"",
-                f"$PidToWait = {current_pid}",
-                "function Log($Message) { Add-Content -LiteralPath $Log -Value \"$(Get-Date -Format o) $Message\" }",
-                "try {",
-                "  Log \"Waiting for process $PidToWait to exit\"",
-                "  try { Wait-Process -Id $PidToWait -Timeout 30 -ErrorAction SilentlyContinue } catch {}",
-                "  Start-Sleep -Milliseconds 700",
-                "  Log \"Staging $Source for $Target\"",
-                "  Copy-Item -LiteralPath $Source -Destination $Staged -Force",
-                "  if (Test-Path -LiteralPath $Backup) { Remove-Item -LiteralPath $Backup -Force }",
-                "  if (Test-Path -LiteralPath $Target) { Move-Item -LiteralPath $Target -Destination $Backup -Force }",
-                "  Move-Item -LiteralPath $Staged -Destination $Target -Force",
-                "  Log \"Starting $Target\"",
-                "  $Env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
-                "  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)",
-                "  Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue",
-                "  Log \"Update complete\"",
-                "} catch {",
-                "  Log \"Update failed: $($_.Exception.Message)\"",
-                "  Remove-Item -LiteralPath $Staged -Force -ErrorAction SilentlyContinue",
-                "  if (Test-Path -LiteralPath $Backup) {",
-                "    Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue",
-                "    Move-Item -LiteralPath $Backup -Destination $Target -Force",
-                "    Log \"Previous version restored\"",
-                "  }",
-                "}",
-                "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
-                "",
-            ]
-        ),
-        # Windows PowerShell 5.1 reads a BOM-less file as ANSI, which corrupts
-        # non-ASCII paths; the BOM makes it decode the script as UTF-8.
-        encoding="utf-8-sig",
-    )
-    cmd_script.write_bytes(
-        cmd_script_bytes(
-            [
-                "@echo off",
-                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{path_with_env_var(ps_script)}"',
-                'del "%~f0" >nul 2>nul',
-                "",
-            ]
-        )
-    )
-
-    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(["cmd.exe", "/c", str(cmd_script)], creationflags=creation_flags)
-
-
-def create_icon_image() -> Image.Image:
-    return draw_icon(64)
-
-
-ICON_PATH = APP_DIR / "app.ico"
-ICON_MARKER = APP_DIR / ".app-icon-v2"
-
-
-def install_window_icon(root: Tk) -> None:
-    """Give every Tk window (taskbar included) the app icon instead of Tk's feather."""
-    try:
-        if not ICON_PATH.exists() or not ICON_MARKER.exists():
-            write_icon(ICON_PATH)
-            ICON_MARKER.write_text("Generated by branding.write_icon\n", encoding="utf-8")
-        root.iconbitmap(default=str(ICON_PATH))
-    except Exception as exc:
-        logging.warning("Could not set window icon from %s: %s", ICON_PATH, exc)
-    try:
-        root._app_icon_photo = ImageTk.PhotoImage(draw_icon(64), master=root)  # type: ignore[attr-defined]
-        root.iconphoto(True, root._app_icon_photo)  # type: ignore[attr-defined]
-    except Exception as exc:
-        logging.warning("Could not set window icon photo: %s", exc)
-
-
-def cleanup_confirmed_update_backup() -> None:
-    if not getattr(sys, "frozen", False):
+def make_non_activating(widget: QWidget) -> None:
+    """Never take keyboard focus away from the window you are dictating into."""
+    if os.name != "nt":
         return
-    backup = Path(f"{current_exe_path()}.bak")
-    try:
-        backup.unlink(missing_ok=True)
-    except OSError as exc:
-        logging.warning("Could not remove confirmed update backup %s: %s", backup, exc)
+    import ctypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    get_style = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    set_style = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get_style.restype = ctypes.c_ssize_t
+    get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    set_style.restype = ctypes.c_ssize_t
+    set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    hwnd = ctypes.c_void_p(int(widget.winId()))
+    GWL_EXSTYLE = -20
+    WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x8, 0x80, 0x08000000
+    style = get_style(hwnd, GWL_EXSTYLE)
+    set_style(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
 
 
-def make_tone(path: Path, notes: list[float]) -> None:
-    sample_rate = 44_100
-    note_duration = 0.09
-    note_gap = 0.025
-    attack_time = 0.015
-    max_gain = 0.2
-    note_samples = int(note_duration * sample_rate)
-    gap_samples = int(note_gap * sample_rate)
-    samples: list[int] = []
+def is_mouse_activate(message) -> bool:
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
 
-    for note_index, freq in enumerate(notes):
-        decay_duration = note_duration - attack_time
-        for i in range(note_samples):
-            t = i / sample_rate
-            sine = math.sin(2 * math.pi * freq * t)
-            if t < attack_time:
-                envelope = (t / attack_time) * max_gain
-            else:
-                decay_progress = (t - attack_time) / decay_duration
-                envelope = max_gain * math.pow(0.0001 / max_gain, decay_progress)
-            samples.append(int(sine * envelope * 32767))
-
-        if note_index < len(notes) - 1:
-            samples.extend([0] * gap_samples)
-
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(b"".join(sample.to_bytes(2, "little", signed=True) for sample in samples))
+    msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+    return msg.message == 0x0021  # WM_MOUSEACTIVATE
 
 
-def ensure_sounds() -> None:
-    global _SOUNDS_READY
-    if _SOUNDS_READY:
-        return
+class StatusBubble(QWidget):
+    """Translucent status pill at the bottom of the screen.
 
-    with _SOUNDS_LOCK:
-        if _SOUNDS_READY:
-            return
-        SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
-        marker = SOUNDS_DIR / ".groqandroid-cues-v1"
-        sounds = {
-            "start.wav": [523.25, 659.25],
-            "success.wav": [587.33, 440.0],
-            "error.wav": [246.94, 196.00],
-        }
-        generated = False
-        for filename, notes in sounds.items():
-            path = SOUNDS_DIR / filename
-            if not path.exists() or not marker.exists():
-                make_tone(path, notes)
-                generated = True
-        if generated or not marker.exists():
-            marker.write_text("Generated from GroqAndroid cue parameters.\n", encoding="utf-8")
-        _SOUNDS_READY = True
+    It is a tool window that never accepts focus (Qt.WindowDoesNotAcceptFocus,
+    WS_EX_NOACTIVATE and MA_NOACTIVATE), so showing or clicking it keeps the
+    target window active and Ctrl+V lands where you were typing.
+    """
 
+    SIZES = {"recording": (196, 48), "processing": (176, 48)}
 
-def play_sound(name: str) -> None:
-    if winsound is None:
-        return
-    ensure_sounds()
-    path = SOUNDS_DIR / name
-    try:
-        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
-    except RuntimeError as exc:
-        logging.warning("Could not play sound %s: %s", name, exc)
-
-
-def play_audio_file(path: Path) -> None:
-    """Play a WAV asynchronously; any cue or other WAV interrupts it."""
-    if winsound is None:
-        raise RuntimeError("Afspelen werkt alleen op Windows.")
-    winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-
-
-def playback_clip(source: Path, offset: float) -> Path:
-    """Copy the WAV from ``offset`` on, because winsound cannot seek."""
-    PLAYBACK_DIR.mkdir(parents=True, exist_ok=True)
-    for old in PLAYBACK_DIR.glob("*.wav"):
-        try:
-            old.unlink()
-        except OSError:
-            pass  # Still in use; removed by a later seek.
-    with wave.open(str(source), "rb") as audio:
-        params = audio.getparams()
-        audio.setpos(min(audio.getnframes(), max(0, int(offset * audio.getframerate()))))
-        frames = audio.readframes(audio.getnframes())
-    with tempfile.NamedTemporaryFile(dir=PLAYBACK_DIR, suffix=".wav", delete=False) as temp:
-        clip = Path(temp.name)
-    with wave.open(str(clip), "wb") as output:
-        output.setparams(params)
-        output.writeframes(frames)
-    return clip
-
-
-def stop_audio() -> None:
-    if winsound is not None:
-        winsound.PlaySound(None, 0)
-
-
-def resolve_input_device(input_device: str) -> int | None:
-    if not input_device:
-        return None
-
-    if input_device.isdigit():
-        return int(input_device)
-
-    devices = sd.query_devices()
-    needle = input_device.lower()
-    for index, device in enumerate(devices):
-        if device["max_input_channels"] > 0 and needle in device["name"].lower():
-            return index
-
-    raise RuntimeError(f"Geen input device gevonden voor {input_device!r}.")
-
-
-def input_devices() -> list[tuple[str, str]]:
-    devices = [("", "Windows default input")]
-    for index, device in enumerate(sd.query_devices()):
-        if device["max_input_channels"] > 0:
-            devices.append((str(index), f"{index}: {device['name']}"))
-    return devices
-
-
-def smooth_audio_level(previous: float, target: float) -> float:
-    """Follow louder input quickly and let quieter input fall back gradually."""
-    if target >= previous:
-        return previous + (target - previous) * WAVE_ATTACK
-    level = max(target, previous * WAVE_RELEASE)
-    return level if level >= 0.01 else 0.0
-
-
-def blend_hex(color: str, background: str, amount: float) -> str:
-    """Mix `amount` of `color` over `background`; Tk canvas items have no alpha."""
-    channels = (
-        round(int(background[i:i + 2], 16) + (int(color[i:i + 2], 16) - int(background[i:i + 2], 16)) * amount)
-        for i in (1, 3, 5)
-    )
-    return "#" + "".join(f"{channel:02x}" for channel in channels)
-
-
-class StatusBubble:
-    def __init__(self, root: Tk, on_click) -> None:
-        self.root = root
+    def __init__(self, on_click) -> None:
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus
+                         | Qt.WindowType.NoDropShadowWindowHint)
         self.on_click = on_click
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.state = "idle"
-        self.button_size = 44
-        self.window_width = self.button_size
-        self.window_height = self.button_size
-        self.hide_after_id = None
-        self.spinner_after_id = None
-        self.spinner_angle = 0
-        self.wave_after_id = None
+        self.message = ""
         self.wave_levels = [0.0] * WAVE_BAR_COUNT
         self.wave_envelope = 0.0
         self.audio_level_provider = lambda: 0.0
         self.recording_started_at = 0.0
-        self.window = Toplevel(root)
-        self.window.withdraw()
-        self.window.overrideredirect(True)
-        self.window.attributes("-topmost", True)
-        try:
-            self.window.attributes("-toolwindow", True)
-        except Exception:
-            pass
+        self.spinner_started_at = 0.0
+        self.pill_size = QSize(44, 44)
+        self.wave_timer = QTimer(self)
+        self.wave_timer.setInterval(WAVE_TICK_MS)
+        self.wave_timer.timeout.connect(self.wave_tick)
+        self.spinner_timer = QTimer(self)
+        self.spinner_timer.setInterval(16)
+        self.spinner_timer.timeout.connect(self.update)
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide)
+        self.setWindowTitle(f"{APP_NAME} - Klaar")
+        self.winId()  # Create the native window now so its styles are in place before the first show.
+        make_non_activating(self)
 
-        self.transparent_color = "#101011"
-        self.window.configure(bg=self.transparent_color)
-        try:
-            self.window.attributes("-transparentcolor", self.transparent_color)
-        except Exception:
-            pass
+    # -- window --------------------------------------------------------------
 
-        self.canvas = Canvas(
-            self.window,
-            width=self.window_width,
-            height=self.window_height,
-            highlightthickness=0,
-            bd=0,
-            bg=self.transparent_color,
-            cursor="hand2",
-        )
-        self.canvas.pack()
-        self.canvas.bind("<Button-1>", lambda _event: self.on_click())
-        self.window.bind("<Button-1>", lambda _event: self.on_click())
-        self.root.bind("<Configure>", lambda _event: self.position(), add="+")
+    def nativeEvent(self, event_type, message):
+        if is_mouse_activate(message):
+            return True, 3  # MA_NOACTIVATE
+        return super().nativeEvent(event_type, message)
 
-        self.position()
-        self.set_state("idle", schedule_hide=False)
+    def resize_pill(self, width: int, height: int) -> None:
+        self.pill_size = QSize(width, height)
+        self.setFixedSize(width + 2 * BUBBLE_MARGIN, height + 2 * BUBBLE_MARGIN)
 
     def position(self) -> None:
-        try:
-            self.window.geometry(
-                bottom_centered_window_geometry(
-                    self.window_width,
-                    self.window_height,
-                    self.window.winfo_screenwidth(),
-                    self.window.winfo_screenheight(),
-                )
-            )
-        except Exception:
-            pass
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        x, y = bottom_centered_position(self.width(), self.height(), screen.availableGeometry())
+        self.move(x, y)
 
-    def show(self) -> None:
-        if self.hide_after_id is not None:
-            try:
-                self.root.after_cancel(self.hide_after_id)
-            except Exception:
-                pass
-            self.hide_after_id = None
+    def show_bubble(self) -> None:
+        self.hide_timer.stop()
         self.position()
-        self.window.deiconify()
-        self.window.lift()
+        if not self.isVisible():
+            self.show()
+        self.raise_()
 
-    def schedule_hide(self) -> None:
-        if self.hide_after_id is not None:
-            try:
-                self.root.after_cancel(self.hide_after_id)
-            except Exception:
-                pass
-        self.hide_after_id = self.root.after(3000, self.hide)
+    def schedule_hide(self, delay_ms: int = NOTICE_VISIBLE_MS) -> None:
+        self.hide_timer.start(delay_ms)
 
-    def stop_spinner(self) -> None:
-        if self.spinner_after_id is not None:
-            try:
-                self.root.after_cancel(self.spinner_after_id)
-            except Exception:
-                pass
-            self.spinner_after_id = None
+    def stop_animations(self) -> None:
+        self.wave_timer.stop()
+        self.spinner_timer.stop()
 
-    def stop_wave(self) -> None:
-        if self.wave_after_id is not None:
-            try:
-                self.root.after_cancel(self.wave_after_id)
-            except Exception:
-                pass
-            self.wave_after_id = None
-
-    def start_spinner(self) -> None:
-        self.stop_spinner()
-
-        def tick() -> None:
-            if self.state != "processing":
-                self.spinner_after_id = None
-                return
-            self.spinner_angle = (self.spinner_angle + 32) % 360
-            self.draw_processing_button()
-            self.spinner_after_id = self.root.after(70, tick)
-
-        tick()
-
-    def start_wave(self) -> None:
-        self.stop_wave()
-        self.recording_started_at = time.perf_counter()
-        self.wave_levels = [0.0] * WAVE_BAR_COUNT
-        self.wave_envelope = 0.0
-
-        def tick() -> None:
-            if self.state != "recording":
-                self.wave_after_id = None
-                return
-            self.wave_envelope = smooth_audio_level(self.wave_envelope, self.audio_level_provider())
-            self.wave_levels = self.wave_levels[1:] + [self.wave_envelope]
-            self.draw_recording_pill()
-            self.wave_after_id = self.root.after(WAVE_TICK_MS, tick)
-
-        tick()
-
-    def hide(self) -> None:
-        self.hide_after_id = None
-        try:
-            self.window.withdraw()
-        except Exception:
-            pass
+    # -- states --------------------------------------------------------------
 
     def set_state(self, state: str, schedule_hide: bool = True) -> None:
         self.state = state
-        self.stop_spinner()
-        self.stop_wave()
-        if state == "idle" and schedule_hide:
-            self.hide()
+        self.stop_animations()
+        titles = {"idle": "Klaar", "recording": "Opname", "processing": "Transcriptie"}
+        self.setWindowTitle(f"{APP_NAME} - {titles.get(state, titles['idle'])}")
+        if state == "idle":
+            if schedule_hide:
+                self.hide()
             return
-
-        self.window_width = 176 if state == "recording" else 162 if state == "processing" else self.button_size
-        self.window_height = 48 if state in {"recording", "processing"} else self.button_size
-        self.canvas.configure(width=self.window_width, height=self.window_height)
-        if state != "idle":
-            self.show()
-
-        self.canvas.delete("all")
-
-        tooltips = {
-            "idle": "Klaar",
-            "recording": "Opname",
-            "processing": "Transcriptie",
-        }
+        self.resize_pill(*self.SIZES.get(state, (44, 44)))
         if state == "recording":
             self.start_wave()
         elif state == "processing":
-            self.draw_processing_button()
-            self.start_spinner()
-        else:
-            self.draw_mic_button(state)
-        tooltip = tooltips.get(state, tooltips["idle"])
-        self.window.title(f"{APP_NAME} - {tooltip}")
-        self.position()
+            self.spinner_started_at = time.perf_counter()
+            self.spinner_timer.start()
+        self.show_bubble()
+        self.update()
 
     def show_notice(self, message: str) -> None:
-        self.stop_spinner()
-        self.stop_wave()
+        self.stop_animations()
         self.state = "notice"
-        self.window_width = 218
-        self.window_height = 48
-        self.canvas.configure(width=self.window_width, height=self.window_height)
-        self.show()
-        self.canvas.delete("all")
-
-        self.draw_round_rect(1, 1, self.window_width - 2, self.window_height - 2, 12, "#fff6f7")
-        self.draw_round_rect_outline(1, 1, self.window_width - 2, self.window_height - 2, 12, "#f3b6bd")
-        self.canvas.create_oval(11, 11, 37, 37, fill="#ffffff", outline="")
-        self.canvas.create_text(24, 24, text="!", fill=BUBBLE_COLORS["idle"], font=("Segoe UI", 16, "bold"))
-        self.canvas.create_text(
-            46,
-            24,
-            text=message,
-            fill="#a11b28",
-            anchor="w",
-            font=("Segoe UI", 10, "bold"),
-        )
-        self.window.title(f"{APP_NAME} - {message}")
+        self.message = message
+        font = self._font(10, QFont.Weight.DemiBold)
+        width = 58 + QFontMetrics(font).horizontalAdvance(message) + 20
+        self.resize_pill(max(200, width), 48)
+        self.setWindowTitle(f"{APP_NAME} - {message}")
+        self.show_bubble()
+        self.update()
         self.schedule_hide()
 
-    def draw_mic_button(self, state: str) -> None:
-        self.draw_round_rect(1, 1, self.button_size - 2, self.button_size - 2, 22, "#fff6f7")
-        self.draw_round_rect_outline(1, 1, self.button_size - 2, self.button_size - 2, 22, "#f3b6bd")
-        self.draw_mic_icon()
+    def start_wave(self) -> None:
+        self.recording_started_at = time.perf_counter()
+        self.wave_levels = [0.0] * WAVE_BAR_COUNT
+        self.wave_envelope = 0.0
+        self.wave_tick()
+        self.wave_timer.start()
 
-    def draw_processing_button(self) -> None:
-        self.canvas.delete("all")
-        self.draw_glass_pill()
-        self.canvas.create_oval(16, 15, 33, 32, outline="#f3b6bd", width=2)
-        self.canvas.create_arc(
-            15,
-            14,
-            34,
-            33,
-            start=self.spinner_angle,
-            extent=105,
-            style="arc",
-            outline=BUBBLE_COLORS["idle"],
-            width=3,
-        )
-        self.canvas.create_text(
-            43,
-            24,
-            text="Transcriberen",
-            fill="#a11b28",
-            anchor="w",
-            font=("Segoe UI", 8, "bold"),
-        )
+    def wave_tick(self) -> None:
+        if self.state != "recording":
+            self.wave_timer.stop()
+            return
+        self.wave_envelope = smooth_audio_level(self.wave_envelope, self.audio_level_provider())
+        self.wave_levels = self.wave_levels[1:] + [self.wave_envelope]
+        self.update()
 
-    def draw_recording_pill(self) -> None:
-        self.canvas.delete("all")
-        self.draw_glass_pill()
-        for index, level in enumerate(self.wave_levels):
-            height = 3 + level * 15
-            x = 17 + index * 4
-            y_mid = 24
-            self.canvas.create_line(
-                x,
-                y_mid - height / 2,
-                x,
-                y_mid + height / 2,
-                fill=blend_hex("#d92c3a", "#fff6f7", min(1.0, 0.3 + 0.7 * index / WAVE_FADED_BARS)),
-                width=2,
-                capstyle="round",
-            )
-
+    def elapsed_label(self) -> str:
         elapsed = max(0, int(time.perf_counter() - self.recording_started_at))
-        elapsed_label = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
-        self.canvas.create_text(70, 24, text=elapsed_label, fill="#a11b28", anchor="w", font=("Segoe UI", 9, "bold"))
-        self.draw_round_rect(128, 10, 156, 38, 8, "#ffe4e7")
-        self.draw_round_rect_outline(128, 10, 156, 38, 8, "#f3b6bd")
-        self.canvas.create_rectangle(138, 20, 146, 28, fill=BUBBLE_COLORS["idle"], outline="")
+        return f"{elapsed // 60:02d}:{elapsed % 60:02d}"
 
-    def draw_glass_pill(self) -> None:
-        self.draw_round_rect(1, 1, self.window_width - 2, self.window_height - 2, 12, "#fff6f7")
-        self.draw_round_rect_outline(1, 1, self.window_width - 2, self.window_height - 2, 12, "#f3b6bd")
+    def bar_heights(self) -> list[float]:
+        return [3 + level * 18 for level in self.wave_levels]
 
-    def draw_mic_icon(self) -> None:
-        center = self.button_size // 2
-        self.canvas.create_line(center, 12, center, 25, fill=BUBBLE_COLORS["idle"], width=7, capstyle="round")
-        self.canvas.create_line(
-            center - 10,
-            23,
-            center - 10,
-            27,
-            center - 8,
-            32,
-            center,
-            35,
-            center + 8,
-            32,
-            center + 10,
-            27,
-            center + 10,
-            23,
-            fill=BUBBLE_COLORS["idle"],
-            width=3,
-            capstyle="round",
-            joinstyle="round",
-            smooth=True,
-        )
-        self.canvas.create_line(center, 35, center, 40, fill=BUBBLE_COLORS["idle"], width=3, capstyle="round")
-        self.canvas.create_line(center - 5, 40, center + 5, 40, fill=BUBBLE_COLORS["idle"], width=3, capstyle="round")
+    @staticmethod
+    def bar_alpha(index: int) -> float:
+        return min(1.0, 0.3 + 0.7 * index / WAVE_FADED_BARS)
 
-    def draw_round_rect(self, x1: int, y1: int, x2: int, y2: int, radius: int, fill: str) -> None:
-        self.canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
-        self.canvas.create_rectangle(x1, y1 + radius, x2, y2 - radius, fill=fill, outline="")
-        self.canvas.create_oval(x1, y1, x1 + radius * 2, y1 + radius * 2, fill=fill, outline="")
-        self.canvas.create_oval(x2 - radius * 2, y1, x2, y1 + radius * 2, fill=fill, outline="")
-        self.canvas.create_oval(x1, y2 - radius * 2, x1 + radius * 2, y2, fill=fill, outline="")
-        self.canvas.create_oval(x2 - radius * 2, y2 - radius * 2, x2, y2, fill=fill, outline="")
+    # -- input ---------------------------------------------------------------
 
-    def draw_round_rect_outline(self, x1: int, y1: int, x2: int, y2: int, radius: int, outline: str) -> None:
-        self.canvas.create_line(x1 + radius, y1, x2 - radius, y1, fill=outline)
-        self.canvas.create_line(x1 + radius, y2, x2 - radius, y2, fill=outline)
-        self.canvas.create_line(x1, y1 + radius, x1, y2 - radius, fill=outline)
-        self.canvas.create_line(x2, y1 + radius, x2, y2 - radius, fill=outline)
-        self.canvas.create_arc(x1, y1, x1 + radius * 2, y1 + radius * 2, start=90, extent=90, outline=outline, style="arc")
-        self.canvas.create_arc(x2 - radius * 2, y1, x2, y1 + radius * 2, start=0, extent=90, outline=outline, style="arc")
-        self.canvas.create_arc(x1, y2 - radius * 2, x1 + radius * 2, y2, start=180, extent=90, outline=outline, style="arc")
-        self.canvas.create_arc(x2 - radius * 2, y2 - radius * 2, x2, y2, start=270, extent=90, outline=outline, style="arc")
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.on_click()
 
-    def destroy(self) -> None:
-        self.stop_spinner()
-        self.stop_wave()
-        if self.hide_after_id is not None:
-            try:
-                self.root.after_cancel(self.hide_after_id)
-            except Exception:
-                pass
-            self.hide_after_id = None
-        try:
-            self.window.destroy()
-        except Exception:
-            pass
+    # -- painting ------------------------------------------------------------
+
+    @staticmethod
+    def _font(points: float, weight=QFont.Weight.Normal) -> QFont:
+        font = QFont("Segoe UI")
+        font.setPointSizeF(points)
+        font.setWeight(weight)
+        return font
+
+    def _pill_rect(self) -> QRectF:
+        return QRectF(BUBBLE_MARGIN, BUBBLE_MARGIN, self.pill_size.width(), self.pill_size.height())
+
+    def paintEvent(self, _event) -> None:
+        if self.state == "idle":
+            return
+        theme = current_theme()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pill = self._pill_rect()
+        radius = pill.height() / 2
+        # Soft shadow: stacked translucent outlines, cheaper than a blur effect.
+        for step in range(BUBBLE_MARGIN, 0, -2):
+            shadow = QColor(0, 0, 0, round(30 * (1 - step / BUBBLE_MARGIN) ** 2) + 2)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(shadow)
+            grown = pill.adjusted(-step * 0.6, -step * 0.35, step * 0.6, step * 0.75)
+            painter.drawRoundedRect(grown, radius + step * 0.5, radius + step * 0.5)
+        fill = QColor("#202624") if theme.dark else QColor("#ffffff")
+        fill.setAlpha(246)
+        border = QColor(255, 255, 255, 28) if theme.dark else QColor(0, 0, 0, 22)
+        painter.setPen(border)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(pill, radius, radius)
+        text_color = QColor(theme.text)
+        if self.state == "recording":
+            self._paint_recording(painter, pill, fill, text_color)
+        elif self.state == "processing":
+            self._paint_processing(painter, pill, theme, text_color)
+        elif self.state == "notice":
+            self._paint_notice(painter, pill, theme)
+
+    def _paint_recording(self, painter: QPainter, pill: QRectF, fill: QColor, text_color: QColor) -> None:
+        middle = pill.center().y()
+        left = pill.left() + 20
+        red = QColor(RECORD_RED)
+        for index, height in enumerate(self.bar_heights()):
+            color = QColor(red)
+            color.setAlphaF(self.bar_alpha(index))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            x = left + index * 5
+            painter.drawRoundedRect(QRectF(x, middle - height / 2, 2.6, height), 1.3, 1.3)
+        painter.setPen(text_color)
+        painter.setFont(self._font(10.5, QFont.Weight.DemiBold))
+        painter.drawText(QRectF(left + WAVE_BAR_COUNT * 5 + 8, pill.top(), 60, pill.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.elapsed_label())
+        stop = QRectF(pill.right() - 40, middle - 15, 30, 30)
+        soft = QColor(red)
+        soft.setAlpha(38)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(soft)
+        painter.drawEllipse(stop)
+        draw_glyph(painter, "stop", stop.adjusted(7, 7, -7, -7), red)
+
+    def _paint_processing(self, painter: QPainter, pill: QRectF, theme, text_color: QColor) -> None:
+        middle = pill.center().y()
+        ring = QRectF(pill.left() + 18, middle - 9, 18, 18)
+        track = QColor(theme.accent)
+        track.setAlpha(50)
+        pen = painter.pen()
+        pen.setWidthF(2.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setColor(track)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring)
+        pen.setColor(QColor(theme.accent_text if theme.dark else theme.accent))
+        painter.setPen(pen)
+        angle = ((time.perf_counter() - self.spinner_started_at) * 400) % 360
+        painter.drawArc(ring, int(-angle * 16), 110 * 16)
+        painter.setPen(text_color)
+        painter.setFont(self._font(10, QFont.Weight.DemiBold))
+        painter.drawText(QRectF(ring.right() + 12, pill.top(), pill.width(), pill.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Transcriberen")
+
+    def _paint_notice(self, painter: QPainter, pill: QRectF, theme) -> None:
+        middle = pill.center().y()
+        badge = QRectF(pill.left() + 14, middle - 13, 26, 26)
+        tone = QColor(theme.danger)
+        soft = QColor(tone)
+        soft.setAlpha(36)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(soft)
+        painter.drawEllipse(badge)
+        draw_glyph(painter, "warning", badge.adjusted(5, 5, -5, -5), tone)
+        painter.setPen(QColor(theme.text))
+        painter.setFont(self._font(10, QFont.Weight.DemiBold))
+        painter.drawText(QRectF(badge.right() + 10, pill.top(), pill.width() - 60, pill.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.message)
+
+    def destroy_bubble(self) -> None:
+        self.stop_animations()
+        self.hide_timer.stop()
+        self.hide()
+        self.deleteLater()
 
 
-@dataclass(frozen=True)
-class RecordingSession:
-    input_device: int | None
-    sample_rate: int
-    channels: int
-    model: str
-    language: str
-    prompt: str
-    word_replacements: tuple[tuple[str, str], ...]
-    paste_after_transcription: bool
-    remove_final_period: bool
-    client: Groq
+class StartupSplash(QWidget):
+    width_px = 440
+    height_px = 196
 
-
-class StartupSplash:
-    width = 440
-    height = 190
-
-    def __init__(self, root: Tk) -> None:
-        self.root = root
-        self.destroyed = False
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setWindowTitle(APP_NAME)
+        self.destroyed_flag = False
         self.started_at = time.monotonic()
-        self.window = Toplevel(root)
-        self.window.overrideredirect(True)
-        self.window.attributes("-topmost", True)
-        self.window.geometry(
-            centered_window_geometry(
-                self.width,
-                self.height,
-                self.window.winfo_screenwidth(),
-                self.window.winfo_screenheight(),
-            )
-        )
-
-        frame = ttk.Frame(self.window, padding=24, relief="solid", borderwidth=1)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Groq Windows Dictation", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        self.status = StringVar(value="Wordt geladen in het systeemvak...")
-        ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 10)).pack(anchor="w", pady=(12, 8))
-        self.progress = ttk.Progressbar(frame, mode="indeterminate")
-        self.progress.pack(fill="x")
-        self.progress.start(12)
-        ttk.Label(
-            frame,
-            text="Daarna blijft de app beschikbaar via het icoon rechtsonder.",
-            foreground="#555555",
-        ).pack(anchor="w", pady=(9, 0))
-
-        # Paint once before synchronous configuration and sound initialization.
-        self.root.update_idletasks()
-        self.root.update()
+        self.setFixedSize(self.width_px, self.height_px)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        card = QFrame()
+        card.setObjectName("card")
+        outer.addWidget(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        brand = QHBoxLayout()
+        brand.setSpacing(12)
+        logo = QLabel()
+        logo.setPixmap(app_icon().pixmap(QSize(40, 40)))
+        brand.addWidget(logo)
+        title = QLabel("Groq Windows Dictation")
+        title.setObjectName("cardTitle")
+        title.setStyleSheet("font-size: 14pt;")
+        brand.addWidget(title, 1)
+        layout.addLayout(brand)
+        self.status = QLabel("Wordt geladen in het systeemvak...")
+        layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        layout.addWidget(self.progress)
+        hint = QLabel("Daarna blijft de app beschikbaar via het icoon rechtsonder.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            self.move(area.x() + (area.width() - self.width()) // 2, area.y() + (area.height() - self.height()) // 2)
+        self.winId()
+        make_non_activating(self)
+        self.show()
+        QApplication.processEvents()
 
     def minimum_time_has_elapsed(self) -> bool:
-        elapsed_ms = (time.monotonic() - self.started_at) * 1000
-        return elapsed_ms >= SPLASH_MIN_VISIBLE_MS
+        return (time.monotonic() - self.started_at) * 1000 >= SPLASH_MIN_VISIBLE_MS
 
     def show_ready(self) -> None:
-        if self.destroyed:
+        if self.destroyed_flag:
             return
-        self.progress.stop()
-        self.status.set("Klaar — actief in het systeemvak")
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.status.setText("Klaar — actief in het systeemvak")
 
-    def destroy(self) -> None:
-        if self.destroyed:
+    def destroy_splash(self) -> None:
+        if self.destroyed_flag:
             return
-        self.destroyed = True
-        self.progress.stop()
-        try:
-            self.window.destroy()
-        except Exception:
-            pass
+        self.destroyed_flag = True
+        self.hide()
+        self.deleteLater()
 
 
-class DictationEngine:
-    def __init__(
-        self, config: Config, status_callback=None, state_callback=None, transcript_callback=None,
-        recording_history: RecordingHistory | None = None, recording_callback=None,
-    ) -> None:
-        self.config = config
-        self.status_callback = status_callback or (lambda message: None)
-        self.state_callback = state_callback or (lambda state: None)
-        self.transcript_callback = transcript_callback or (lambda text: None)
-        self.recordings = recording_history if recording_history is not None else RecordingHistory(RECORDINGS_DIR)
-        self.recording_callback = recording_callback or (lambda: None)
-        self.input_device: int | None = None
-        self.input_device_error: str | None = None
-        self._resolve_device(config)
-        self.client = Groq(api_key=config.api_key) if config.api_key else None
-        self.audio_queue: queue.SimpleQueue = queue.SimpleQueue()
-        self.audio_warning: str | None = None
-        self.audio_level_reading = (0.0, 0.0)
-        self.audio_level_peak = 0.0
-        self.stream: sd.InputStream | None = None
-        self.active_session: RecordingSession | None = None
-        self.state = "idle"
-        self.lock = threading.Lock()
-        self.stream_transition_lock = threading.Lock()
+def message(kind: str, text: str, parent=None) -> None:
+    icon = {"info": QMessageBox.Icon.Information, "error": QMessageBox.Icon.Warning}[kind]
+    box = QMessageBox(icon, APP_NAME, text, parent=parent)
+    box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+    box.setWindowIcon(app_icon())
+    box.exec()
 
-        pyautogui.FAILSAFE = False
-        pyautogui.PAUSE = 0
 
-    def _resolve_device(self, config: Config) -> None:
-        """Never let a vanished microphone block startup; report it when recording."""
-        try:
-            self.input_device = resolve_input_device(config.input_device)
-            self.input_device_error = None
-        except Exception as exc:
-            self.input_device = None
-            self.input_device_error = str(exc)
-            logging.warning("Could not resolve input device: %s", exc)
-
-    def update_config(self, config: Config) -> None:
-        with self.lock:
-            self.config = config
-            self._resolve_device(config)
-            self.client = Groq(api_key=config.api_key) if config.api_key else None
-
-    def notify(self, message: str) -> None:
-        logging.info(message)
-        self.status_callback(message)
-
-    def emit_state(self, state: str) -> None:
-        self.state_callback(state)
-
-    def on_shortcut(self) -> None:
-        """Toggle recording. Returns immediately; the work runs on a worker thread.
-
-        Opening the microphone or flushing the stream can take hundreds of
-        milliseconds, which must never block the thread that reports the
-        shortcut (Windows silently drops slow keyboard hooks).
-        """
-        threading.Thread(target=self.toggle_recording, name="dictation-toggle", daemon=True).start()
-
-    def toggle_recording(self) -> None:
-        try:
-            with self.lock:
-                state = self.state
-
-            if state == "idle":
-                self.start_recording()
-            elif state == "recording":
-                self.stop_recording()
-            else:
-                self.notify("Nog bezig met transcriberen; shortcut genegeerd.")
-        except Exception as exc:
-            with self.lock:
-                self.state = "idle"
-            self.emit_state("idle")
-            self.notify(f"Kon opname niet starten/stoppen: {exc}")
-            play_sound("error.wav")
-
-    def start_recording(self) -> None:
-        with self.stream_transition_lock:
-            self._start_recording()
-
-    def _start_recording(self) -> None:
-        with self.lock:
-            if self.state != "idle":
-                return
-            config = self.config
-            if self.input_device_error:
-                self.notify(f"{self.input_device_error} Kies een andere microfoon in Instellingen.")
-                play_sound("error.wav")
-                return
-            if not config.api_key or self.client is None:
-                session = None
-            else:
-                session = RecordingSession(
-                    input_device=self.input_device,
-                    sample_rate=config.sample_rate,
-                    channels=config.channels,
-                    model=config.model,
-                    language=config.language,
-                    prompt=compose_transcription_prompt(config.prompt, config.custom_words),
-                    word_replacements=config.word_replacements,
-                    paste_after_transcription=config.paste_after_transcription,
-                    remove_final_period=config.remove_final_period,
-                    client=self.client,
-                )
-
-            if session is None:
-                self.notify("Open Instellingen en vul eerst je Groq API key in.")
-                play_sound("error.wav")
-                return
-            self.state = "recording"
-            self.active_session = session
-            self.audio_queue = queue.SimpleQueue()
-            self.audio_warning = None
-            self.audio_level_reading = (0.0, 0.0)
-            self.audio_level_peak = 0.0
-
-        stream: sd.InputStream | None = None
-        try:
-            stream = sd.InputStream(
-                device=session.input_device,
-                samplerate=session.sample_rate,
-                channels=session.channels,
-                dtype="int16",
-                callback=self.audio_callback,
-            )
-            stream.start()
-            self.stream = stream
-        except Exception:
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    logging.exception("Could not close failed input stream")
-            with self.lock:
-                self.state = "idle"
-                self.active_session = None
-                self.stream = None
-            self.emit_state("idle")
-            raise
-
-        self.emit_state("recording")
-        play_sound("start.wav")
-        self.notify("Opname gestart. Gebruik je shortcut opnieuw om te stoppen.")
-
-    def stop_recording(self) -> None:
-        with self.stream_transition_lock:
-            self._stop_recording()
-
-    def _stop_recording(self) -> None:
-        with self.lock:
-            if self.state != "recording":
-                return
-            self.state = "processing"
-            stream = self.stream
-            self.stream = None
-            session = self.active_session
-            self.active_session = None
-        self.emit_state("processing")
-
-        if stream is not None:
-            time.sleep(POST_STOP_RECORDING_SECONDS)
-            try:
-                stream.stop()
-            except Exception as exc:
-                logging.warning("Could not stop input stream cleanly: %s", exc)
-            finally:
-                try:
-                    stream.close()
-                except Exception as exc:
-                    logging.warning("Could not close input stream cleanly: %s", exc)
-
-        captured_frames: list[np.ndarray] = []
-        while True:
-            try:
-                captured_frames.append(self.audio_queue.get_nowait())
-            except queue.Empty:
-                break
-
-        if self.audio_warning:
-            self.notify(f"Audio waarschuwing: {self.audio_warning}")
-        self.notify("Opname gestopt. Transcriberen...")
-        if session is None:
-            raise RuntimeError("Opnamesessie ontbreekt.")
-        threading.Thread(
-            target=self.transcribe_and_output,
-            args=(session, captured_frames),
-            daemon=True,
-        ).start()
-
-    def audio_callback(self, indata, frames, time_info, status) -> None:
-        if status:
-            self.audio_warning = str(status)
-        self.audio_queue.put(indata.copy())
-        # The stream supplies int16 PCM. Cast before squaring to avoid overflow.
-        values = np.asarray(indata, dtype=np.float32)
-        rms = math.sqrt(float(np.mean(np.square(values)))) / 32768.0 if values.size else 0.0
-        level = 0.0
-        if rms > AUDIO_LEVEL_NOISE_FLOOR:
-            level = min(
-                1.0,
-                math.log(rms / AUDIO_LEVEL_NOISE_FLOOR)
-                / math.log(AUDIO_LEVEL_FULL_SCALE / AUDIO_LEVEL_NOISE_FLOOR),
-            )
-        # Publish snapshots; the Tk timer reads them without queuing UI work
-        # from PortAudio's callback thread. The peak keeps short syllables that
-        # fall between two UI ticks.
-        self.audio_level_peak = max(self.audio_level_peak, level)
-        self.audio_level_reading = (level, time.monotonic())
-
-    def get_audio_level(self) -> float:
-        """Loudest level since the previous read, or the latest level if no new audio arrived yet."""
-        level, updated_at = self.audio_level_reading
-        peak, self.audio_level_peak = self.audio_level_peak, 0.0
-        if self.state != "recording" or time.monotonic() - updated_at > AUDIO_LEVEL_TIMEOUT_SECONDS:
-            return 0.0
-        return max(peak, level)
-
-    def write_wav_and_stats(
-        self,
-        session: RecordingSession,
-        frames: list[np.ndarray],
-    ) -> tuple[Path, float, float, float]:
-        if not frames:
-            raise RuntimeError("Geen audio opgenomen.")
-
-        temp = tempfile.NamedTemporaryFile(
-            prefix="groq-insert-dictation-",
-            suffix=".wav",
-            delete=False,
+class UpdateDialog(QDialog):
+    def __init__(self, app: "TrayApp", update: updater.UpdateInfo) -> None:
+        super().__init__(None)
+        self.app = app
+        self.update_info = update
+        self.setWindowTitle("Nieuwe versie beschikbaar")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setMinimumWidth(500)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        title = QLabel(f"Er is een nieuwe versie beschikbaar: {update.tag}")
+        title.setObjectName("cardTitle")
+        title.setStyleSheet("font-size: 13pt;")
+        layout.addWidget(title)
+        body = QLabel(
+            f"Je gebruikt nu v{APP_VERSION}. Klik op Update om de nieuwe versie te downloaden, "
+            "de app te vervangen en opnieuw te starten. Je Groq API key, instellingen en geschiedenis blijven behouden."
         )
-        temp_path = Path(temp.name)
-        temp.close()
+        body.setWordWrap(True)
+        layout.addWidget(body)
+        self.status = QLabel("")
+        self.status.setObjectName("muted")
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        later = QPushButton("Later")
+        later.clicked.connect(self.close)
+        self.update_button = QPushButton(f"Update naar {update.tag}")
+        self.update_button.setProperty("variant", "primary")
+        self.update_button.setDefault(True)
+        self.update_button.clicked.connect(self.start_update)
+        buttons.addWidget(later)
+        buttons.addWidget(self.update_button)
+        layout.addLayout(buttons)
 
-        frame_count = 0
-        sample_count = 0
-        peak_value = 0.0
-        sum_of_squares = 0.0
-        try:
-            with wave.open(str(temp_path), "wb") as wav:
-                wav.setnchannels(session.channels)
-                wav.setsampwidth(2)
-                wav.setframerate(session.sample_rate)
-                for frame in frames:
-                    wav.writeframesraw(frame.tobytes())
-                    values = np.asarray(frame, dtype=np.float64)
-                    frame_count += len(frame)
-                    sample_count += values.size
-                    if values.size:
-                        peak_value = max(peak_value, float(np.max(np.abs(values))))
-                        sum_of_squares += float(np.sum(np.square(values)))
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
+    def start_update(self) -> None:
+        self.update_button.setEnabled(False)
+        self.status.setText("Downloaden en controleren...")
+        update = self.update_info
 
-        duration = frame_count / session.sample_rate
-        peak = peak_value / 32768.0 if sample_count else 0.0
-        rms = math.sqrt(sum_of_squares / sample_count) / 32768.0 if sample_count else 0.0
-        return temp_path, duration, peak, rms
-
-    def retry_recording(self, recording_id: str) -> None:
-        """Retry saved audio with current settings, without pasting into Settings."""
-        with self.lock:
-            if self.state != "idle":
-                raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
-            if not self.config.api_key or self.client is None:
-                raise RuntimeError("Vul eerst je Groq API key in en sla je instellingen op.")
-            entry = self.recordings.get(recording_id)
-            config = self.config
-            session = RecordingSession(
-                input_device=None, sample_rate=config.sample_rate, channels=config.channels,
-                model=config.model, language=config.language,
-                prompt=compose_transcription_prompt(config.prompt, config.custom_words),
-                word_replacements=config.word_replacements, paste_after_transcription=False,
-                remove_final_period=config.remove_final_period, client=self.client,
-            )
-            self.state = "processing"
-        try:
-            self.emit_state("processing")
-            threading.Thread(
-                target=self.transcribe_and_output, args=(session, [], entry),
-                name="dictation-retry", daemon=True,
-            ).start()
-        except Exception:
-            with self.lock:
-                self.state = "idle"
-            self.emit_state("idle")
-            raise
-
-    def update_recording(self, entry: RecordingEntry, *, status: str, text: str | None = None, error: str = "") -> None:
-        self.recordings.update(entry.id, status=status, text=text, error=error)
-        self.recording_changed()
-
-    def recording_changed(self) -> None:
-        try:
-            self.recording_callback()
-        except Exception:
-            logging.exception("Could not refresh recording history")
-
-    def transcribe_and_output(
-        self, session: RecordingSession, frames: list[np.ndarray], recording: RecordingEntry | None = None,
-    ) -> None:
-        wav_path: Path | None = None
-        temp_path: Path | None = None
-        started_at = time.perf_counter()
-        show_idle_bubble = True
-        try:
-            if recording is None:
-                temp_path, duration, peak, rms = self.write_wav_and_stats(session, frames)
-                frames.clear()
-                # Commit the WAV before any request, including recordings that
-                # are too short or receive an empty/error response from Groq.
-                try:
-                    recording = self.recordings.add(temp_path)
-                except Exception as exc:
-                    preserved_path = temp_path
-                    temp_path = None  # Keep the original as a last-resort backup.
-                    raise RuntimeError(
-                        f"Opname opslaan in Geschiedenis mislukt. Audio staat nog in {preserved_path}: {exc}"
-                    ) from exc
-                wav_path = self.recordings.audio_path(recording)
-                self.recording_changed()
-                self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
-                if duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES:
-                    self.update_recording(recording, status="failed", error="Opname te kort. Je kunt opnieuw proberen.")
-                    self.notify("Transcriptie te kort. Er is niets geplakt.")
-                    self.emit_state("too_short")
-                    play_sound("error.wav")
-                    show_idle_bubble = False
-                    return
-
-                if peak < 0.01:
-                    self.notify("Waarschuwing: bijna geen inputvolume gemeten. Check microfoon/device.")
-            else:
-                wav_path = self.recordings.audio_path(recording)
-
-            self.update_recording(recording, status="processing")
-
-            text = apply_word_replacements(
-                self.transcribe(session, wav_path).strip(),
-                session.word_replacements,
-            )
-            text = apply_final_period_preference(
-                text,
-                remove_final_period=session.remove_final_period,
-            )
-            elapsed = time.perf_counter() - started_at
-
-            if not text:
-                raise RuntimeError("Geen tekst herkend. Opname bewaard; probeer opnieuw via Geschiedenis.")
-
-            if set(text) == {"*"}:
-                raise RuntimeError("Groq gaf alleen sterretjes terug. Check je microfoon of probeer opnieuw via Geschiedenis.")
-
-            self.update_recording(recording, status="done", text=text)
-            pasted_text = append_trailing_space(text)
-            pyperclip.copy(pasted_text)
-            self.notify(f"Transcriptie klaar in {elapsed:.1f}s. Tekst staat op je klembord.")
+        def run() -> None:
             try:
-                self.transcript_callback(text)
-            except Exception:
-                logging.exception("Could not record transcription history")
-
-            if session.paste_after_transcription:
-                try:
-                    pyautogui.hotkey("ctrl", "v")
-                    self.notify("Geplakt in het actieve venster.")
-                except Exception as exc:
-                    self.notify(f"Automatisch plakken mislukte, maar de tekst staat op je klembord: {exc}")
-
-            play_sound("success.wav")
-        except Exception as exc:
-            if recording is not None:
-                self.update_recording(recording, status="failed", error=str(exc))
-            self.notify(f"Fout: {exc}")
-            play_sound("error.wav")
-        finally:
-            frames.clear()
-            if temp_path is not None:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            with self.lock:
-                self.state = "idle"
-            if show_idle_bubble:
-                self.emit_state("idle")
-            self.recording_changed()
-            self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")
-
-    def transcribe(self, session: RecordingSession, wav_path: Path) -> str:
-        kwargs = {
-            "file": wav_path.open("rb"),
-            "model": session.model,
-            "response_format": "json",
-            "temperature": 0.0,
-        }
-        if session.language:
-            kwargs["language"] = session.language
-        if session.prompt:
-            kwargs["prompt"] = session.prompt
-
-        with kwargs["file"] as audio_file:
-            kwargs["file"] = audio_file
-            try:
-                transcription = session.client.audio.transcriptions.create(**kwargs)
+                staged = updater.download_update(update)
+                updater.launch_update_script(staged, update.kind)
             except Exception as exc:
-                error_text = str(exc).lower()
-                if "prompt" in error_text and ("224" in error_text or "token" in error_text):
-                    raise RuntimeError(
-                        "Prompt en woordenboek zijn samen te lang voor Groq. "
-                        "Maak de Prompt korter of verwijder enkele woorden."
-                    ) from exc
-                raise
+                logging.exception("Update failed")
+                text = f"Update mislukt:\n{exc}"
 
-        return getattr(transcription, "text", "") or ""
+                def failed() -> None:
+                    try:
+                        self.update_button.setEnabled(True)
+                        self.status.setText("Update mislukt.")
+                    except RuntimeError:
+                        pass
+                    message("error", text)
 
-    def shutdown(self) -> None:
-        with self.stream_transition_lock:
-            self._shutdown()
+                self.app.bridge.run_on_main(failed)
+                return
+            self.app.bridge.run_on_main(self.app.quit)
 
-    def _shutdown(self) -> None:
-        with self.lock:
-            stream = self.stream
-            self.stream = None
-            self.active_session = None
-            self.state = "idle"
-        if stream is not None:
-            try:
-                stream.abort()
-            except Exception:
-                try:
-                    stream.stop()
-                except Exception:
-                    pass
-            finally:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-
-
-configure_ui = apply_theme
+        threading.Thread(target=run, name="update-download", daemon=True).start()
 
 
 class TrayApp:
+    app_name = APP_NAME
+    app_version = APP_VERSION
+
     def __init__(self) -> None:
         setup_logging()
-        self.root = Tk()
-        self.root.withdraw()
-        self.root.title(APP_NAME)
-        apply_theme(self.root)
-        install_window_icon(self.root)
-        self.splash = StartupSplash(self.root)
-        self.tray_startup_complete = threading.Event()
-        self.tray_startup_error: Exception | None = None
+        self.qt = QApplication.instance() or QApplication(sys.argv)
+        self.qt.setQuitOnLastWindowClosed(False)
+        self.qt.setApplicationName(APP_NAME)
+        self.qt.setApplicationVersion(APP_VERSION)
+        self.qt.setWindowIcon(app_icon())
+        apply_theme(self.qt)
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self.on_color_scheme_changed)
+        self.bridge = EngineBridge()
+        self.splash = StartupSplash()
         self.fatal_startup_error: Exception | None = None
         self.startup_finished = False
+        self.startup_timer = QTimer()
+        self.startup_timer.setInterval(25)
+        self.startup_timer.timeout.connect(self._poll_startup_ready)
 
         try:
             ensure_sounds()
             self.config = load_config()
-            self.bubble = StatusBubble(self.root, self.on_bubble_click)
-            self.history = TranscriptionHistory(HISTORY_PATH)
-            self.recordings = RecordingHistory(RECORDINGS_DIR)
+            self.config = dataclasses.replace(self.config, input_device=stable_input_selector(self.config.input_device))
+            self.bubble = StatusBubble(self.on_bubble_click)
+            self.history = TranscriptionHistory(config_store.HISTORY_PATH)
+            self.recordings = RecordingHistory(config_store.RECORDINGS_DIR)
+            self.player = AudioPlayer(sd)
+            self.bridge.status.connect(self.set_status)
+            self.bridge.state.connect(self.set_engine_state)
+            self.bridge.recordings_changed.connect(self._refresh_history_view)
             self.engine = DictationEngine(
-                self.config, self.set_status, self.set_engine_state, self.on_transcript,
-                self.recordings, self.on_recording_changed,
+                self.config, self.bridge.status.emit, self.bridge.state.emit, self.on_transcript,
+                self.recordings, self.bridge.recordings_changed.emit,
             )
             self.bubble.audio_level_provider = self.engine.get_audio_level
+            self.microphone_test: MicrophoneTest | None = None
             self.hotkeys = HotkeyListener(self.engine.on_shortcut)
             self.hotkey_error: str | None = None
             self.settings_window: SettingsWindow | None = None
-            self.update_window = None
-            self.icon = pystray.Icon(
-                APP_SLUG,
-                create_icon_image(),
-                f"{APP_NAME} v{APP_VERSION}",
-                menu=pystray.Menu(
-                    pystray.MenuItem("Instellingen", lambda: self.root.after(0, self.open_settings)),
-                    pystray.MenuItem("Geschiedenis", lambda: self.root.after(0, lambda: self.open_settings("history"))),
-                    pystray.MenuItem("Controleren op updates", lambda: self.root.after(0, self.check_for_updates_manual)),
-                    pystray.MenuItem("Geluiden testen", lambda: self.root.after(0, self.test_sounds)),
-                    pystray.MenuItem("Logbestand openen", lambda: self.root.after(0, self.open_log)),
-                    pystray.MenuItem("App herstarten", lambda: self.root.after(0, self.restart)),
-                    pystray.MenuItem("Afsluiten", lambda: self.root.after(0, self.quit)),
-                ),
-            )
+            self.update_window: UpdateDialog | None = None
+            self.tray = QSystemTrayIcon(app_icon())
+            self.tray.setToolTip(f"{APP_NAME} v{APP_VERSION}")
+            self.tray.activated.connect(self.on_tray_activated)
+            self.menu = QMenu()
+            for text, action in (
+                ("Instellingen", self.open_settings),
+                ("Geschiedenis", lambda: self.open_settings("history")),
+                (None, None),
+                ("Controleren op updates", self.check_for_updates_manual),
+                ("Logbestand openen", self.open_log),
+                ("App herstarten", self.restart),
+                (None, None),
+                ("Afsluiten", self.quit),
+            ):
+                if text is None:
+                    self.menu.addSeparator()
+                else:
+                    self.menu.addAction(text, action)
+            self.tray.setContextMenu(self.menu)
         except Exception:
-            self.splash.destroy()
-            self.root.destroy()
+            self.splash.destroy_splash()
             raise
 
-    def set_status(self, message: str) -> None:
-        try:
-            self.icon.title = f"{APP_NAME} - {message[:50]}"
-        except Exception:
-            pass
+    # -- engine adapter (GUI thread) -----------------------------------------
+
+    def set_status(self, text: str) -> None:
+        self.tray.setToolTip(f"{APP_NAME} - {text[:80]}")
 
     def set_engine_state(self, state: str) -> None:
         if state == "too_short":
-            self.root.after(0, lambda: self.bubble.show_notice("Transcriptie te kort"))
+            self.bubble.show_notice("Transcriptie te kort")
         else:
-            self.root.after(0, lambda: self.bubble.set_state(state))
-        self.root.after(0, self._refresh_history_view)
+            if state == "recording":
+                self.player.stop()  # Never mix playback into a dictation.
+            self.bubble.set_state(state)
+        self._refresh_history_view()
+
+    def on_transcript(self, text: str) -> None:
+        """Runs on the transcription worker; store first, then refresh any open window."""
+        self.history.add(text)
+        self.bridge.recordings_changed.emit()
 
     def on_bubble_click(self) -> None:
         """The floating bubble stops a running recording; otherwise it opens settings."""
@@ -1706,6 +638,15 @@ class TrayApp:
             self.engine.on_shortcut()
         elif state == "idle":
             self.open_settings()
+
+    def on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.open_settings()
+
+    def on_color_scheme_changed(self, *_args) -> None:
+        apply_theme(self.qt)
+        for widget in self.qt.topLevelWidgets():
+            widget.update()
 
     def install_hotkey(self) -> None:
         self.hotkeys.set_hotkey(self.config.shortcut)
@@ -1719,19 +660,63 @@ class TrayApp:
 
     # -- SettingsController protocol -----------------------------------------
 
-    app_name = APP_NAME
-    app_version = APP_VERSION
-
     @property
     def app_dir(self) -> str:
-        return str(APP_DIR)
+        return str(config_store.APP_DIR)
 
-    def list_input_devices(self) -> list[tuple[str, str]]:
+    def _refresh_inputs_locked(self) -> None:
+        # PortAudio enumerates once at initialization. Reset it only while no
+        # dictation/test/playback stream owns it; callers hold both engine locks.
+        if self.engine.state != "idle":
+            raise RuntimeError("Stop eerst de opname of microfoontest voordat je apparaten vernieuwt.")
+        self.player.release()
+        sd._terminate()
+        sd._initialize()
+        self.engine._resolve_device(self.config)
+
+    def list_input_devices(self, *, refresh: bool = False) -> list[tuple[str, str]]:
         try:
-            return input_devices()
+            with self.engine.stream_transition_lock, self.engine.lock:
+                if refresh or self.engine.state == "idle":
+                    self._refresh_inputs_locked()
+                return input_devices()
         except Exception as exc:
+            if refresh:
+                raise
             logging.warning("Could not list input devices: %s", exc)
-            return [("", "Windows default input")]
+            return [("", f"{DEFAULT_DEVICE_LABEL} (apparaat niet beschikbaar)")]
+
+    def start_microphone_test(self, selector: str) -> None:
+        self.stop_microphone_test()
+        with self.engine.stream_transition_lock, self.engine.lock:
+            self._refresh_inputs_locked()
+            device = resolve_input_device(selector)
+            self.engine.state = "testing"
+
+            def finished():
+                with self.engine.lock:
+                    if self.engine.state == "testing":
+                        self.engine.state = "idle"
+
+            self.microphone_test = MicrophoneTest(sd, device, wasapi=selector.startswith("wasapi:"), finished=finished)
+            self.microphone_test.start()
+
+    def microphone_test_status(self) -> MicrophoneTestStatus:
+        return self.microphone_test.snapshot() if self.microphone_test else MicrophoneTestStatus()
+
+    def play_microphone_test(self) -> float:
+        if self.microphone_test is None:
+            raise RuntimeError("Maak eerst een testopname.")
+        if self.recording_busy():
+            raise RuntimeError("Wacht tot de opname klaar is.")
+        return self.player.play(MICROPHONE_TEST_KEY, self.microphone_test.playback_path())
+
+    def stop_microphone_test(self) -> None:
+        if self.player.status().key == MICROPHONE_TEST_KEY:
+            self.player.release()
+        if self.microphone_test is not None:
+            self.microphone_test.close()
+            self.microphone_test = None
 
     def autostart_enabled(self) -> bool:
         return autostart_enabled()
@@ -1764,15 +749,9 @@ class TrayApp:
                 logging.warning("Could not restore previous hotkey: %s", exc)
             raise
 
-    def on_transcript(self, text: str) -> None:
-        """Runs on the transcription worker; store first, then refresh any open window."""
-        self.history.add(text)
-        self.root.after(0, self._refresh_history_view)
-
     def _refresh_history_view(self) -> None:
-        window = self.settings_window
-        if window is not None and window.winfo_exists():
-            window.refresh_history()
+        if self.settings_window is not None:
+            self.settings_window.refresh_history()
 
     def history_entries(self) -> tuple[HistoryEntry, ...]:
         return self.history.entries
@@ -1784,20 +763,18 @@ class TrayApp:
         with self.engine.lock:
             return self.engine.state != "idle"
 
-    def on_recording_changed(self) -> None:
-        self.root.after(0, self._refresh_history_view)
-
     def retry_recording(self, recording_id: str) -> None:
         self.engine.retry_recording(recording_id)
 
     def play_recording(self, recording_id: str, offset: float = 0.0) -> float:
         entry = self.recordings.get(recording_id)
-        path = self.recordings.audio_path(entry)
-        play_audio_file(playback_clip(path, offset) if offset > 0 else path)
-        return entry.duration
+        return self.player.play(recording_id, self.recordings.audio_path(entry), offset)
 
     def stop_playback(self) -> None:
-        stop_audio()
+        self.player.stop()
+
+    def playback_status(self) -> PlaybackStatus:
+        return self.player.status()
 
     def copy_text(self, text: str) -> None:
         pyperclip.copy(text)
@@ -1806,7 +783,7 @@ class TrayApp:
         with self.engine.lock:
             if self.engine.state != "idle":
                 raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
-            stop_audio()
+            self.player.release()
             self.recordings.clear()
             self.history.clear()
 
@@ -1818,6 +795,8 @@ class TrayApp:
         if not whisper:
             return "Verbonden met Groq, maar er is geen Whisper-model beschikbaar voor deze sleutel."
         return f"Verbonden. Beschikbare spraakmodellen: {', '.join(whisper)}."
+
+    # -- lifecycle -----------------------------------------------------------
 
     def run(self) -> None:
         # A startup save migrates a non-empty legacy/.env key to Credential
@@ -1832,38 +811,32 @@ class TrayApp:
                 # Start anyway so the user can pick another shortcut in Settings.
                 self.hotkey_error = str(exc)
                 logging.warning("Hotkey unavailable at startup: %s", exc)
-            self.icon.run_detached(self._setup_tray)
-            self.root.after(25, self._poll_startup_ready)
+            self.tray.show()
+            self.startup_timer.start()
         except Exception:
             self._cleanup_failed_startup()
             raise
-        self.root.mainloop()
+        self.qt.exec()
         if self.fatal_startup_error is not None:
             raise self.fatal_startup_error
 
-    def _setup_tray(self, icon: pystray.Icon) -> None:
-        try:
-            icon.visible = True
-        except Exception as exc:
-            self.tray_startup_error = exc
-        finally:
-            self.tray_startup_complete.set()
+    def tray_ready(self) -> bool:
+        return QSystemTrayIcon.isSystemTrayAvailable() and self.tray.isVisible()
 
     def _poll_startup_ready(self) -> None:
         if self.startup_finished:
+            self.startup_timer.stop()
             return
         elapsed_ms = (time.monotonic() - self.splash.started_at) * 1000
-        if not self.tray_startup_complete.is_set() and elapsed_ms >= SPLASH_TRAY_TIMEOUT_MS:
+        ready = self.tray_ready()
+        if not ready and elapsed_ms >= SPLASH_TRAY_TIMEOUT_MS:
+            self.startup_timer.stop()
             self._fail_startup(RuntimeError("Het systeemvak kon niet op tijd worden gestart."))
             return
-        if self.tray_startup_complete.is_set() and self.tray_startup_error is not None:
-            self._fail_startup(RuntimeError(f"Het systeemvak kon niet worden gestart: {self.tray_startup_error}"))
-            return
-        if self.tray_startup_complete.is_set() and self.splash.minimum_time_has_elapsed():
+        if ready and self.splash.minimum_time_has_elapsed():
+            self.startup_timer.stop()
             self.splash.show_ready()
-            self.root.after(SPLASH_READY_VISIBLE_MS, self._finish_startup)
-            return
-        self.root.after(25, self._poll_startup_ready)
+            QTimer.singleShot(SPLASH_READY_VISIBLE_MS, self._finish_startup)
 
     def _fail_startup(self, error: Exception) -> None:
         self.fatal_startup_error = error
@@ -1871,33 +844,35 @@ class TrayApp:
 
     def _cleanup_failed_startup(self) -> None:
         self.startup_finished = True
-        self.splash.destroy()
+        self.splash.destroy_splash()
         self.remove_hotkey()
         try:
-            self.icon.stop()
+            self.tray.hide()
         except Exception:
             pass
-        try:
-            self.root.quit()
-            self.root.destroy()
-        except Exception:
-            pass
+        self.qt.quit()
 
     def _finish_startup(self) -> None:
         if self.startup_finished:
             return
         self.startup_finished = True
-        self.splash.destroy()
+        self.splash.destroy_splash()
+        age = process_age_ms()
+        logging.info(
+            "Startup ready: version %s, layout %s%s", APP_VERSION, updater.install_layout(),
+            f", {age:.0f} ms after launch" if age is not None else "",
+        )
 
         if not self.config.api_key or "--settings" in sys.argv or self.hotkey_error:
-            self.root.after(250, self.open_settings)
+            QTimer.singleShot(250, self.open_settings)
         if self.hotkey_error:
-            self.root.after(400, lambda: messagebox.showwarning(APP_NAME, self.hotkey_error))
-        self.root.after(2500, self.check_for_updates_auto)
-        self.root.after(5000, cleanup_confirmed_update_backup)
+            error = self.hotkey_error
+            QTimer.singleShot(400, lambda: message("error", error))
+        QTimer.singleShot(2500, self.check_for_updates_auto)
+        QTimer.singleShot(5000, updater.confirm_startup_and_cleanup)
 
     def check_for_updates_auto(self) -> None:
-        if not getattr(sys, "frozen", False):
+        if not getattr(sys, "frozen", False) or config_store.profile_name():
             return
         self.check_for_updates(show_no_update=False)
 
@@ -1907,121 +882,55 @@ class TrayApp:
     def check_for_updates(self, show_no_update: bool) -> None:
         def run() -> None:
             try:
-                update = fetch_latest_update()
+                update = updater.fetch_latest_update()
             except Exception as exc:
                 logging.warning("Update check failed: %s", exc)
                 if show_no_update:
                     # Bind the message now: `exc` is unbound once the except block ends.
-                    message = f"Update-check mislukt:\n{exc}"
-                    self.root.after(0, lambda: messagebox.showerror(APP_NAME, message))
+                    text = f"Update-check mislukt:\n{exc}"
+                    self.bridge.run_on_main(lambda: message("error", text))
                 return
 
             if update is None:
                 if show_no_update:
-                    self.root.after(
-                        0,
-                        lambda: messagebox.showinfo(
-                            APP_NAME,
-                            f"Je gebruikt de nieuwste versie: v{APP_VERSION}.",
-                        ),
-                    )
+                    self.bridge.run_on_main(lambda: message("info", f"Je gebruikt de nieuwste versie: v{APP_VERSION}."))
                 return
 
-            self.root.after(0, lambda: self.show_update_window(update))
+            self.bridge.run_on_main(lambda: self.show_update_window(update))
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run, name="update-check", daemon=True).start()
 
-    def show_update_window(self, update: UpdateInfo) -> None:
-        if self.update_window is not None and self.update_window.winfo_exists():
-            self.update_window.lift()
-            self.update_window.focus_force()
-            return
-
-        window = Toplevel(self.root)
-        self.update_window = window
-        window.title("Nieuwe versie beschikbaar")
-        window.geometry("480x220")
-        window.resizable(False, False)
-
-        frame = ttk.Frame(window, padding=18)
-        frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
-
-        ttk.Label(
-            frame,
-            text=f"Er is een nieuwe versie beschikbaar: {update.tag}",
-            font=("", 11, "bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
-        ttk.Label(
-            frame,
-            text=(
-                f"Je gebruikt nu v{APP_VERSION}. Klik op Update om de nieuwe versie te downloaden, "
-                "de app te vervangen en opnieuw te starten. Je Groq API key en instellingen blijven behouden."
-            ),
-            wraplength=430,
-        ).grid(row=1, column=0, sticky="w")
-
-        status = StringVar(value="")
-        ttk.Label(frame, textvariable=status, foreground="#555").grid(row=2, column=0, sticky="w", pady=14)
-
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, sticky="e", pady=(8, 0))
-
-        update_button = ttk.Button(buttons, text=f"Update naar {update.tag}")
-        update_button.pack(side="left", padx=6)
-        ttk.Button(buttons, text="Later", command=window.destroy).pack(side="left", padx=6)
-
-        def start_update() -> None:
-            update_button.configure(state="disabled")
-            status.set("Downloaden...")
-
-            def run() -> None:
-                try:
-                    downloaded = download_update(update)
-                    launch_update_script(downloaded)
-                except Exception as exc:
-                    logging.exception("Update failed")
-                    message = f"Update mislukt:\n{exc}"
-                    self.root.after(
-                        0,
-                        lambda: (
-                            update_button.configure(state="normal"),
-                            status.set("Update mislukt."),
-                            messagebox.showerror(APP_NAME, message),
-                        ),
-                    )
-                    return
-
-                self.root.after(0, self.quit)
-
-            threading.Thread(target=run, daemon=True).start()
-
-        update_button.configure(command=start_update)
+    def show_update_window(self, update: updater.UpdateInfo) -> None:
+        if self.update_window is not None:
+            try:
+                self.update_window.raise_()
+                self.update_window.activateWindow()
+                return
+            except RuntimeError:
+                self.update_window = None
+        self.update_window = UpdateDialog(self, update)
+        self.update_window.destroyed.connect(lambda *_: setattr(self, "update_window", None))
+        self.update_window.show()
 
     def open_settings(self, page: str | None = None) -> None:
-        if self.settings_window is None or not self.settings_window.winfo_exists():
-            self.settings_window = SettingsWindow(self.root, self)
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow(self)
+            self.settings_window.closed.connect(self._settings_closed)
+            self.settings_window.show()
         else:
-            self.settings_window.deiconify()
-            self.settings_window.lift()
-            self.settings_window.focus_force()
+            self.settings_window.showNormal()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
         if page:
             self.settings_window.select_page(page)
 
-    def test_sounds(self) -> None:
-        def run() -> None:
-            for sound in ("start.wav", "success.wav"):
-                play_sound(sound)
-                time.sleep(0.32)
-
-        threading.Thread(target=run, daemon=True).start()
+    def _settings_closed(self) -> None:
+        self.settings_window = None
 
     def open_log(self) -> None:
-        LOG_PATH.touch(exist_ok=True)
-        try:
-            os.startfile(LOG_PATH)  # type: ignore[attr-defined]
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, f"Logbestand kon niet worden geopend:\n{exc}")
+        config_store.LOG_PATH.touch(exist_ok=True)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_store.LOG_PATH))):
+            message("error", f"Logbestand kon niet worden geopend:\n{config_store.LOG_PATH}")
 
     def restart(self) -> None:
         env = os.environ.copy()
@@ -2047,23 +956,27 @@ class TrayApp:
                 self.install_hotkey()
             except Exception as hotkey_exc:
                 logging.warning("Could not restore hotkey after a failed restart: %s", hotkey_exc)
-            messagebox.showerror(APP_NAME, f"App kon niet worden herstart:\n{exc}")
+            message("error", f"App kon niet worden herstart:\n{exc}")
             return
 
         self.quit()
 
     def quit(self) -> None:
         self.startup_finished = True
-        self.splash.destroy()
+        self.splash.destroy_splash()
+        if self.settings_window is not None:
+            self.settings_window.dirty = False
+            self.settings_window.close()
         self.hotkeys.stop()
+        self.stop_microphone_test()
+        self.player.release()
         self.engine.shutdown()
-        self.bubble.destroy()
+        self.bubble.destroy_bubble()
         try:
-            self.icon.stop()
+            self.tray.hide()
         except Exception:
             pass
-        self.root.quit()
-        self.root.destroy()
+        self.qt.quit()
 
 
 def main() -> None:
@@ -2076,7 +989,8 @@ def main() -> None:
         setup_logging()
         logging.exception("Fatal startup error")
         try:
-            messagebox.showerror(APP_NAME, f"Startfout:\n{exc}\n\nLog: {LOG_PATH}")
+            QApplication.instance() or QApplication(sys.argv)
+            message("error", f"Startfout:\n{exc}\n\nLog: {config_store.LOG_PATH}")
         except Exception:
             pass
         raise SystemExit(1)

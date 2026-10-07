@@ -1,10 +1,8 @@
 import os
 import threading
 import unittest
-from types import SimpleNamespace
 
-import hotkeys
-from hotkeys import HotkeyError, HotkeyListener, hotkey_from_tk_event, normalize_hotkey_text, parse_hotkey
+from hotkeys import HotkeyError, HotkeyListener, hotkey_from_key_press, normalize_hotkey_text, parse_hotkey
 
 
 class ParseHotkeyTests(unittest.TestCase):
@@ -40,27 +38,30 @@ class ParseHotkeyTests(unittest.TestCase):
             parse_hotkey("")
 
 
-class TkEventTests(unittest.TestCase):
-    @staticmethod
-    def event(keysym: str, state: int, keycode: int = 0, char: str = "") -> SimpleNamespace:
-        return SimpleNamespace(keysym=keysym, state=state, keycode=keycode, char=char)
-
+class KeyPressTests(unittest.TestCase):
     def test_lone_modifier_is_ignored(self) -> None:
-        self.assertIsNone(hotkey_from_tk_event(self.event("Alt_L", 0)))
-        self.assertIsNone(hotkey_from_tk_event(self.event("Control_L", 0x4)))
+        self.assertIsNone(hotkey_from_key_press(key_name="alt", alt=True))
+        self.assertIsNone(hotkey_from_key_press(key_name="ctrl", ctrl=True))
+        self.assertIsNone(hotkey_from_key_press(key_name="", virtual_key=0xA2, ctrl=True))  # VK_LCONTROL
 
-    def test_windows_alt_bit_is_recognized(self) -> None:
-        event = self.event("z", hotkeys.TK_STATE_ALT_WINDOWS, keycode=0x5A, char="z")
-        self.assertEqual(hotkey_from_tk_event(event), "alt+z")
+    def test_modifiers_are_ordered_like_saved_settings(self) -> None:
+        self.assertEqual(hotkey_from_key_press(key_name="z", alt=True), "alt+z")
+        self.assertEqual(hotkey_from_key_press(key_name="f9", virtual_key=0x78, ctrl=True, shift=True), "ctrl+shift+f9")
+        self.assertEqual(hotkey_from_key_press(key_name="space", shift=True, windows=True, ctrl=True), "ctrl+shift+windows+space")
 
-    @unittest.skipUnless(os.name == "nt", "Num Lock is only reported as Mod1 on Windows")
-    def test_num_lock_does_not_become_alt_on_windows(self) -> None:
-        event = self.event("Delete", hotkeys.TK_STATE_MOD1, keycode=0x2E)
-        self.assertEqual(hotkey_from_tk_event(event), "delete")
+    def test_single_keys_like_insert_and_f9_work_without_modifiers(self) -> None:
+        self.assertEqual(hotkey_from_key_press(key_name="insert", virtual_key=0x2D), "insert")
+        self.assertEqual(hotkey_from_key_press(key_name="f9"), "f9")
 
-    def test_control_and_shift_bits(self) -> None:
-        event = self.event("F9", 0x4 | 0x1, keycode=0x78)
-        self.assertEqual(hotkey_from_tk_event(event), "ctrl+shift+f9")
+    @unittest.skipUnless(os.name == "nt", "virtual-key codes are Windows-specific")
+    def test_virtual_key_wins_over_the_shifted_symbol(self) -> None:
+        # Shift+1 types "!" on most layouts; the shortcut is still shift+1.
+        self.assertEqual(hotkey_from_key_press(key_name="!", virtual_key=0x31, shift=True), "shift+1")
+        self.assertEqual(hotkey_from_key_press(key_name="kp 5", virtual_key=0x65), "kp 5")
+
+    def test_unknown_keys_are_ignored(self) -> None:
+        self.assertIsNone(hotkey_from_key_press(key_name=""))
+        self.assertIsNone(hotkey_from_key_press(key_name="volume knob"))
 
 
 class ListenerTests(unittest.TestCase):

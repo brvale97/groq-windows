@@ -31,13 +31,16 @@ jobs:
 
       - name: Build Windows executable
         shell: pwsh
-        run: .\build-app.ps1
+        run: .\build-app.ps1 -Bridge
 
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # The zip is the folder build that 0.2.0+ installs; the single exe is
+          # the bridge for updaters up to 0.1.27, which replace exactly one file.
           files: |
+            dist/GroqInsertDictation-win64.zip
             dist/GroqInsertDictation.exe
             dist/GroqInsertDictation.build.json
           generate_release_notes: true
