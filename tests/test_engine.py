@@ -16,6 +16,7 @@ install_missing_stubs()
 import numpy as np  # noqa: E402
 
 import engine  # noqa: E402
+from dictation_core import PARAGRAPH_SEPARATOR  # noqa: E402
 from config_store import Config  # noqa: E402
 from history import RecordingHistory, TranscriptionHistory  # noqa: E402
 
@@ -338,7 +339,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.engine.client.audio.transcriptions.create.return_value.text = response
         self.engine.transcribe_and_output(self.session, self.frames())
         stored = self.engine.recordings.entries[0].text
-        self.assertIn("\n\n\n\nGroetjes.", stored)
+        self.assertIn(PARAGRAPH_SEPARATOR + "Groetjes.", stored)
         self.assertEqual(stored.split(), response.split())
         self.assertEqual(self.history.entries[0].text, stored)
         self.clipboard.assert_called_once_with(stored.replace("\n", "\r\n") + " ")

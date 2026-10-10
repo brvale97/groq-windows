@@ -165,8 +165,8 @@ PARAGRAPH_MIN_CHARACTERS = 200
 PARAGRAPH_MAX_SENTENCES = 3
 PARAGRAPH_TARGET_CHARACTERS = 220
 PARAGRAPH_TOPIC_MIN_CHARACTERS = 60
-# Three empty lines between blocks, so the breaks stand out in a chat window.
-PARAGRAPH_SEPARATOR = "\n" * 4
+# One empty line between blocks, like a normal paragraph break.
+PARAGRAPH_SEPARATOR = "\n\n"
 # Sentence openers that usually start a new thought.
 TOPIC_SHIFT_OPENERS = (
     "verder", "daarnaast", "daarna", "oh ja", "o ja", "dan nog", "wat betreft", "trouwens", "overigens", "anyway", "oké", "oke", "ok", "nou",

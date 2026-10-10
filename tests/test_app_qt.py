@@ -140,7 +140,7 @@ class StatusBubbleTests(unittest.TestCase):
     def test_states_resize_show_and_hide(self):
         self.bubble.set_state("recording")
         self.assertTrue(self.bubble.isVisible())
-        self.assertEqual(self.bubble.pill_size.width(), 196)
+        self.assertLess(self.bubble.pill_size.width(), 196)
         self.assertTrue(self.bubble.wave_timer.isActive())
         self.bubble.set_state("processing")
         self.assertFalse(self.bubble.wave_timer.isActive())

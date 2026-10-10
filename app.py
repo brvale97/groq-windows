@@ -172,7 +172,8 @@ class StatusBubble(QWidget):
     target window active and Ctrl+V lands where you were typing.
     """
 
-    SIZES = {"recording": (196, 48), "processing": (176, 48)}
+    SIZES = {"processing": (176, 48)}
+    TIMER_STOP_GAP = 10
 
     def __init__(self, on_click) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
@@ -281,6 +282,16 @@ class StatusBubble(QWidget):
             return
         self.wave_envelope = smooth_audio_level(self.wave_envelope, self.audio_level_provider())
         self.wave_levels = self.wave_levels[1:] + [self.wave_envelope]
+        font = self._font(10.5, QFont.Weight.DemiBold)
+        metrics = QFontMetrics(font)
+        minute_digits = len(self.elapsed_label().split(":")[0])
+        timer_width = max(metrics.horizontalAdvance(f"{digit * minute_digits}:{digit * 2}")
+                          for digit in "0123456789")
+        width = 20 + WAVE_BAR_COUNT * 5 + 8 + timer_width + self.TIMER_STOP_GAP + 30 + 10
+        if self.pill_size.width() != width:
+            self.resize_pill(width, 48)
+            if self.isVisible():
+                self.position()
         self.update()
 
     def elapsed_label(self) -> str:
@@ -354,7 +365,9 @@ class StatusBubble(QWidget):
             painter.drawRoundedRect(QRectF(x, middle - height / 2, 2.6, height), 1.3, 1.3)
         painter.setPen(text_color)
         painter.setFont(self._font(10.5, QFont.Weight.DemiBold))
-        painter.drawText(QRectF(left + WAVE_BAR_COUNT * 5 + 8, pill.top(), 60, pill.height()),
+        timer_left = left + WAVE_BAR_COUNT * 5 + 8
+        timer_width = pill.right() - 40 - self.TIMER_STOP_GAP - timer_left
+        painter.drawText(QRectF(timer_left, pill.top(), timer_width, pill.height()),
                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.elapsed_label())
         stop = QRectF(pill.right() - 40, middle - 15, 30, 30)
         soft = QColor(red)

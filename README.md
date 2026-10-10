@@ -19,6 +19,11 @@ A small dictation app for Windows:
 
 ## Setup
 
+<!-- Source: Bram's screenshot and correction, 2026-10-10. Scope: recording status bubble. -->
+In **0.2.2**, the recording pill fits the timer text with a 10-pixel gap before
+the stop button. It expands for recordings over 99 minutes without clipping
+the timer; ordinary recordings keep a stable width.
+
 For development:
 
 ```powershell

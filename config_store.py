@@ -19,7 +19,7 @@ import keyring
 
 from dictation_core import normalize_custom_words, normalize_word_replacements
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
