@@ -42,6 +42,7 @@ from dictation_core import (
 )
 from history import RecordingEntry, RecordingHistory
 from microphone_test import windows_audio_thread
+from speech_detection import NoSpeechDetected, contains_speech, response_is_silence
 
 try:
     import winsound
@@ -584,6 +585,7 @@ class DictationEngine:
         temp_path: Path | None = None
         started_at = time.perf_counter()
         show_idle_bubble = True
+        new_recording = recording is None
         try:
             if recording is None:
                 temp_path, duration, peak, rms = self.write_wav_and_stats(session, frames)
@@ -601,18 +603,19 @@ class DictationEngine:
                 wav_path = self.recordings.audio_path(recording)
                 self.recording_changed()
                 self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
-                if duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES:
-                    self.update_recording(recording, status="failed", error="Opname te kort. Je kunt opnieuw proberen.")
-                    self.notify("Transcriptie te kort. Er is niets geplakt.")
-                    self.emit_state("too_short")
-                    play_sound("error.wav")
-                    show_idle_bubble = False
-                    return
-
-                if peak < 0.01:
-                    self.notify("Waarschuwing: bijna geen inputvolume gemeten. Check microfoon/device.")
             else:
                 wav_path = self.recordings.audio_path(recording)
+
+            if not isinstance(session.client, QaClient) and not contains_speech(wav_path):
+                raise NoSpeechDetected()
+
+            if new_recording and (duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES):
+                self.update_recording(recording, status="failed", error="Opname te kort. Je kunt opnieuw proberen.")
+                self.notify("Transcriptie te kort. Er is niets geplakt.")
+                self.emit_state("too_short")
+                play_sound("error.wav")
+                show_idle_bubble = False
+                return
 
             self.update_recording(recording, status="processing")
 
@@ -651,6 +654,12 @@ class DictationEngine:
                     self.notify(f"Automatisch plakken mislukte, maar de tekst staat op je klembord: {exc}")
 
             play_sound("success.wav")
+        except NoSpeechDetected as exc:
+            if recording is not None:
+                self.update_recording(recording, status="failed", error=str(exc))
+            self.notify(str(exc))
+            self.emit_state("no_speech")
+            show_idle_bubble = False
         except Exception as exc:
             if recording is not None:
                 self.update_recording(recording, status="failed", error=str(exc))
@@ -674,7 +683,7 @@ class DictationEngine:
         kwargs = {
             "file": wav_path.open("rb"),
             "model": session.model,
-            "response_format": "json",
+            "response_format": "verbose_json",
             "temperature": 0.0,
         }
         if session.language:
@@ -695,6 +704,8 @@ class DictationEngine:
                     ) from exc
                 raise
 
+        if response_is_silence(getattr(transcription, "segments", None)):
+            raise NoSpeechDetected()
         return getattr(transcription, "text", "") or ""
 
     def shutdown(self) -> None:

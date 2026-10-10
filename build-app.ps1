@@ -63,9 +63,9 @@ Assert-NativeSuccess "App-versie uitlezen"
 $sources = [ordered]@{}
 foreach ($file in @(
     "app.py", "audio_player.py", "branding.py", "config_store.py", "dictation_core.py", "engine.py", "history.py",
-    "hotkeys.py", "microphone_test.py", "settings_ui.py", "ui_theme.py", "updater.py", "windows_services.py",
+    "hotkeys.py", "microphone_test.py", "speech_detection.py", "settings_ui.py", "ui_theme.py", "updater.py", "windows_services.py",
     "requirements.txt", "requirements-build.txt", "bootstrap.ps1", "build-app.ps1",
-    "packaging\GroqInsertDictation.spec", "packaging\collect_licenses.py", "packaging\make_zip.py", "THIRD_PARTY_NOTICES.md",
+    "packaging\GroqInsertDictation.spec", "packaging\hooks\hook-webrtcvad.py", "packaging\collect_licenses.py", "packaging\make_zip.py", "THIRD_PARTY_NOTICES.md",
     "install-app.ps1"
 )) {
     $sources[$file] = Get-Sha256 $file

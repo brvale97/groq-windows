@@ -25,3 +25,6 @@ https://download.qt.io/official_releases/QtForPython/.
 Python (PSF License), NumPy, Pillow, sounddevice/PortAudio, groq, keyring,
 pyautogui, pyperclip and truststore are bundled under their own licenses;
 see the `licenses` folder.
+
+Local speech detection uses webrtcvad-wheels (MIT) and its WebRTC voice activity
+detector (BSD). Both license texts are included in the package's license folder.

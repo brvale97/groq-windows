@@ -633,6 +633,8 @@ class TrayApp:
     def set_engine_state(self, state: str) -> None:
         if state == "too_short":
             self.bubble.show_notice("Transcriptie te kort")
+        elif state == "no_speech":
+            self.bubble.show_notice("Geen spraak gedetecteerd")
         else:
             if state == "recording":
                 self.player.stop()  # Never mix playback into a dictation.

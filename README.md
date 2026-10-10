@@ -8,6 +8,8 @@ A small dictation app for Windows:
 - The configured shortcut starts recording.
 - Pressing the shortcut again stops recording.
 - Audio is sent to Groq Speech-to-Text using `whisper-large-v3-turbo`.
+- A local speech detector skips recordings with no detected speech before sending
+  audio to Groq. Nothing is copied or pasted; the original audio remains in History.
 - The transcript is always copied to your clipboard.
 - The text is then pasted automatically into the active window.
 - Settings are managed from the system tray, including the Groq API key, microphone, customizable shortcut, and automatic startup.
@@ -62,6 +64,15 @@ To run the tests:
 ```
 
 ## Settings
+
+<!-- Source: Bram's empty-audio report, 2026-10-10. Scope: dictation and recording retries. -->
+In **0.2.3**, local WebRTC voice activity detection checks for speech, including
+on retries. Quiet speech and short words can pass without requiring a large
+speech-to-silence ratio. Pure tones (including the start cue) do not count as
+speech. Groq's `verbose_json` silence/confidence metadata provides a second
+check. These checks reduce empty-audio hallucinations; speech detection is not
+perfect. No transcript phrases are blacklisted, so spoken "Thank you" remains
+valid. Rejected audio stays in History and the app shows **Geen spraak gedetecteerd**.
 
 Settings are stored in `%APPDATA%\GroqInsertDictation\settings.json`. The API key is stored in Windows Credential Manager whenever possible.
 

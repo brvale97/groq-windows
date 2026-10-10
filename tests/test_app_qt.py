@@ -235,6 +235,12 @@ class TrayBehaviourTests(unittest.TestCase):
         tray.set_engine_state("too_short")
         tray.bubble.show_notice.assert_called_once_with("Transcriptie te kort")
 
+    def test_silent_audio_shows_a_notice_without_an_idle_bubble(self):
+        tray = self.tray_with_engine()
+        tray.set_engine_state("no_speech")
+        tray.bubble.show_notice.assert_called_once_with("Geen spraak gedetecteerd")
+        tray.bubble.set_state.assert_not_called()
+
     def test_refresh_releases_playback_before_reinitializing_portaudio(self):
         tray = self.tray_with_engine()
         order = []

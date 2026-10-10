@@ -250,7 +250,9 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def frames(self, duration=1.5):
-        return [np.full((int(16_000 * duration), 1), 4_000, dtype=np.int16)]
+        speech = np.fromfile(Path(__file__).parent / "fixtures" / "webrtc-speech-8k.raw", dtype="<i2")
+        speech = np.repeat(speech, 2)  # 8 kHz fixture at the session's 16 kHz.
+        return [np.resize(speech, int(16_000 * duration)).reshape(-1, 1)]
 
     def fail_then_reload(self):
         self.engine.client.audio.transcriptions.create.side_effect = RuntimeError("Network unavailable")
@@ -332,6 +334,49 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.assertEqual(self.history.entries[0].text, entry.text)
         self.clipboard.assert_called_once_with("Herkenning werkt. ")
         self.paste.assert_called_once_with("ctrl", "v")
+
+    def test_silent_recording_and_retry_skip_groq_and_preserve_clipboard(self) -> None:
+        self.engine.transcribe_and_output(self.session, [np.zeros((24_000, 1), dtype=np.int16)])
+        entry = self.engine.recordings.entries[0]
+        audio = self.engine.recordings.audio_path(entry).read_bytes()
+        self.assertEqual(entry.status, "failed")
+        self.assertIn("Geen spraak", entry.error)
+        self.engine.state_callback.assert_called_with("no_speech")
+        self.run_retry_synchronously(entry.id)
+        self.assertEqual(self.engine.recordings.audio_path(entry).read_bytes(), audio)
+        self.engine.client.audio.transcriptions.create.assert_not_called()
+        self.clipboard.assert_not_called()
+        self.paste.assert_not_called()
+        self.assertEqual(self.history.entries, ())
+        self.assertEqual(self.engine.state, "idle")
+
+    def test_groq_silence_metadata_blocks_hallucination_after_local_gate(self) -> None:
+        response = self.engine.client.audio.transcriptions.create.return_value
+        response.text = "Thank you for watching!"
+        response.segments = [{"no_speech_prob": 0.98, "avg_logprob": -1.5}]
+        self.engine.transcribe_and_output(self.session, self.frames())
+        entry = self.engine.recordings.entries[0]
+        self.assertEqual(entry.status, "failed")
+        self.assertIn("Geen spraak", entry.error)
+        kwargs = self.engine.client.audio.transcriptions.create.call_args.kwargs
+        self.assertEqual(kwargs["response_format"], "verbose_json")
+        self.clipboard.assert_not_called()
+        self.paste.assert_not_called()
+
+    def test_spoken_thank_you_is_not_blacklisted(self) -> None:
+        response = self.engine.client.audio.transcriptions.create.return_value
+        response.text = "Thank you"
+        response.segments = [{"no_speech_prob": 0.01, "avg_logprob": -0.2}]
+        self.engine.transcribe_and_output(self.session, self.frames())
+        self.clipboard.assert_called_once_with("Thank you ")
+        self.paste.assert_called_once_with("ctrl", "v")
+
+    def test_very_short_silence_also_shows_no_speech_notice(self) -> None:
+        self.engine.transcribe_and_output(self.session, [np.zeros((8000, 1), dtype=np.int16)])
+        self.engine.state_callback.assert_called_with("no_speech")
+        self.engine.client.audio.transcriptions.create.assert_not_called()
+        self.clipboard.assert_not_called()
+        self.paste.assert_not_called()
 
     def test_long_dictation_is_pasted_as_paragraphs_unless_disabled(self) -> None:
         sentences = [f"Dit is zin nummer {index} van een langer gesproken bericht." for index in range(1, 7)]
