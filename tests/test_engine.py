@@ -332,6 +332,23 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.clipboard.assert_called_once_with("Herkenning werkt. ")
         self.paste.assert_called_once_with("ctrl", "v")
 
+    def test_long_dictation_is_pasted_as_paragraphs_unless_disabled(self) -> None:
+        sentences = [f"Dit is zin nummer {index} van een langer gesproken bericht." for index in range(1, 7)]
+        response = " ".join(sentences) + " Groetjes."
+        self.engine.client.audio.transcriptions.create.return_value.text = response
+        self.engine.transcribe_and_output(self.session, self.frames())
+        stored = self.engine.recordings.entries[0].text
+        self.assertIn("\n\n\n\nGroetjes.", stored)
+        self.assertEqual(stored.split(), response.split())
+        self.assertEqual(self.history.entries[0].text, stored)
+        self.clipboard.assert_called_once_with(stored.replace("\n", "\r\n") + " ")
+
+        self.clipboard.reset_mock()
+        session = dataclasses.replace(self.session, auto_paragraphs=False)
+        self.engine.transcribe_and_output(session, self.frames())
+        self.assertEqual(self.engine.recordings.entries[0].text, response)
+        self.clipboard.assert_called_once_with(response + " ")
+
     def test_empty_and_star_only_responses_leave_retryable_audio(self) -> None:
         for response in ("", "   ", "***"):
             with self.subTest(response=response):

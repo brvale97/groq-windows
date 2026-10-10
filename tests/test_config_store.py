@@ -58,7 +58,8 @@ class ConfigStoreTests(unittest.TestCase):
             "model": "whisper-large-v3", "language": "nl", "prompt": "Overleg",
             "custom_words": ["Groq"], "word_replacements": [["Grok", "Groq"]], "shortcut": "insert",
             "input_device": "wasapi:Microphone (Realtek(R) Audio)", "sample_rate": 16000, "channels": 1,
-            "paste_after_transcription": True, "remove_final_period": False, "autostart": True,
+            "paste_after_transcription": True, "remove_final_period": False, "auto_paragraphs": True,
+            "autostart": True,
         }
         with tempfile.TemporaryDirectory() as directory:
             settings_path = self.patched(
@@ -82,6 +83,7 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(config.custom_words, ())
             self.assertEqual(config.word_replacements, ())
             self.assertFalse(config.remove_final_period)
+            self.assertTrue(config.auto_paragraphs)
 
     def test_corrupt_settings_fall_back_to_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

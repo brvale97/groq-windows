@@ -2,11 +2,14 @@ import unittest
 import unicodedata
 
 from dictation_core import (
+    PARAGRAPH_SEPARATOR,
     DictionaryValidationError,
     append_trailing_space,
     apply_final_period_preference,
     apply_word_replacements,
+    clipboard_text,
     compose_transcription_prompt,
+    format_paragraphs,
     normalize_custom_word,
     normalize_custom_words,
     normalize_word_replacements,
@@ -31,6 +34,53 @@ class FinalPeriodPreferenceTests(unittest.TestCase):
             apply_final_period_preference("Even denken...", remove_final_period=True),
             "Even denken...",
         )
+
+
+class ParagraphTests(unittest.TestCase):
+    MESSAGE = (
+        "Hoi Jan, ik wilde even laten weten dat de offerte bijna klaar is. Ik heb bijv. de prijzen al aangepast. "
+        "Het enige wat nog mist is de planning voor volgende week. Die stuur ik morgen. "
+        "Verder wilde ik vragen of je donderdag tijd hebt om even te bellen. Dan kunnen we de details doornemen. "
+        "Groetjes, Bram."
+    )
+
+    def test_splits_a_long_dictation_into_chat_paragraphs(self) -> None:
+        self.assertEqual(
+            format_paragraphs(self.MESSAGE),
+            PARAGRAPH_SEPARATOR.join((
+                "Hoi Jan, ik wilde even laten weten dat de offerte bijna klaar is. Ik heb bijv. de prijzen al aangepast.",
+                "Het enige wat nog mist is de planning voor volgende week. Die stuur ik morgen.",
+                "Verder wilde ik vragen of je donderdag tijd hebt om even te bellen. Dan kunnen we de details doornemen.",
+                "Groetjes, Bram.",
+            )),
+        )
+
+    def test_only_whitespace_between_sentences_changes(self) -> None:
+        self.assertEqual(format_paragraphs(self.MESSAGE).split(), self.MESSAGE.split())
+
+    def test_short_messages_stay_one_block(self) -> None:
+        for text in ("Kort bericht. Echt kort. Klaar.", "Een lange zin " * 30, "Zin een.\nZin twee."):
+            self.assertEqual(format_paragraphs(text), text)
+
+    def test_paragraphs_stay_short(self) -> None:
+        text = " ".join(f"Dit is zin nummer {index} met wat extra woorden erbij." for index in range(1, 21))
+        paragraphs = format_paragraphs(text).split(PARAGRAPH_SEPARATOR)
+        self.assertGreater(len(paragraphs), 5)
+        for paragraph in paragraphs:
+            self.assertLessEqual(paragraph.count("."), 3)
+            self.assertLessEqual(len(paragraph), 260)
+
+    def test_never_breaks_inside_numbers_or_abbreviations(self) -> None:
+        text = (
+            "Het kost 3.5 euro per stuk en dat is o.a. door de transportkosten. Dhr. Jansen vond dat te veel. "
+            "Hij wil bijv. korting. Wat vind jij daarvan? Laat het me weten! Dan kan ik het doorgeven aan hem."
+        )
+        for paragraph in format_paragraphs(text).split(PARAGRAPH_SEPARATOR):
+            self.assertFalse(paragraph.startswith(("5", "a.", "Jansen", "korting")), paragraph)
+
+    def test_clipboard_uses_windows_line_breaks(self) -> None:
+        self.assertEqual(clipboard_text("Een.\n\nTwee. "), "Een.\r\n\r\nTwee. ")
+        self.assertEqual(clipboard_text("Al\r\ngoed"), "Al\r\ngoed")
 
 
 class TrailingSpaceTests(unittest.TestCase):

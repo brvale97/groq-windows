@@ -733,10 +733,11 @@ class SettingsWindow(QWidget):
         behaviour_card = Card("Gedrag")
         self.paste_switch = ToggleSwitch("Transcriptie automatisch plakken", config.paste_after_transcription)
         self.remove_period_switch = ToggleSwitch("Punt aan het einde verwijderen", config.remove_final_period)
+        self.paragraphs_switch = ToggleSwitch("Automatisch alinea's maken", config.auto_paragraphs)
         self.autostart_switch = ToggleSwitch(
             "Start automatisch met Windows", config.autostart or self.controller.autostart_enabled(),
         )
-        for switch in (self.paste_switch, self.remove_period_switch, self.autostart_switch):
+        for switch in (self.paste_switch, self.remove_period_switch, self.paragraphs_switch, self.autostart_switch):
             switch.toggled.connect(lambda _checked: self.mark_dirty())
             behaviour_card.body.addWidget(switch)
         page.addWidget(behaviour_card)
@@ -1469,6 +1470,7 @@ class SettingsWindow(QWidget):
             input_device=self.selected_device_id(),
             paste_after_transcription=self.paste_switch.isChecked(),
             remove_final_period=self.remove_period_switch.isChecked(),
+            auto_paragraphs=self.paragraphs_switch.isChecked(),
             autostart=self.autostart_switch.isChecked(),
             # If Credential Manager could not be read at startup, an unchanged
             # fallback value must not overwrite a newer secret. Deliberately

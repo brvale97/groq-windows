@@ -19,7 +19,7 @@ import keyring
 
 from dictation_core import normalize_custom_words, normalize_word_replacements
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
@@ -93,6 +93,7 @@ class Config:
     channels: int = 1
     paste_after_transcription: bool = True
     remove_final_period: bool = False
+    auto_paragraphs: bool = True
     autostart: bool = True
     keyring_read_succeeded: bool = field(default=True, repr=False, compare=False)
 
@@ -181,6 +182,7 @@ def load_config() -> Config:
             else env.get("PASTE_AFTER_TRANSCRIPTION", "true").lower() in {"1", "true", "yes", "on"}
         ),
         remove_final_period=bool(data.get("remove_final_period", False)),
+        auto_paragraphs=bool(data.get("auto_paragraphs", True)),
         autostart=bool(data.get("autostart", True)),
         keyring_read_succeeded=keyring_read_succeeded,
     )

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import unicodedata
+import math
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 
 
@@ -157,3 +158,120 @@ def append_trailing_space(text: str) -> str:
     if not text or text[-1].isspace():
         return text
     return f"{text} "
+
+
+# Chat-style paragraphs: short blocks of a few sentences, like a typed message.
+PARAGRAPH_MIN_CHARACTERS = 200
+PARAGRAPH_MAX_SENTENCES = 3
+PARAGRAPH_TARGET_CHARACTERS = 220
+PARAGRAPH_TOPIC_MIN_CHARACTERS = 60
+# Three empty lines between blocks, so the breaks stand out in a chat window.
+PARAGRAPH_SEPARATOR = "\n" * 4
+# Sentence openers that usually start a new thought.
+TOPIC_SHIFT_OPENERS = (
+    "verder", "daarnaast", "daarna", "oh ja", "o ja", "dan nog", "wat betreft", "trouwens", "overigens", "anyway", "oké", "oke", "ok", "nou",
+    "tot slot", "ten slotte", "andere vraag", "nog iets", "btw", "by the way",
+    "also", "besides", "furthermore", "additionally", "finally",
+)
+CLOSING_OPENERS = (
+    "groetjes", "groeten", "groet", "met vriendelijke groet", "mvg", "fijne dag", "fijn weekend",
+    "alvast bedankt", "bedankt alvast", "dank je wel", "dankjewel", "thanks", "cheers",
+    "best regards", "kind regards",
+)
+# Abbreviations whose period does not end a sentence.
+NON_TERMINAL_ABBREVIATIONS = frozenset({
+    "bijv", "bv", "bijvoorbeeld", "o.a", "d.w.z", "i.p.v", "m.b.t", "t.o.v", "z.s.m", "e.d",
+    "enz", "etc", "dhr", "mevr", "mr", "mrs", "ms", "dr", "prof", "ir", "ing", "drs", "mw",
+    "nr", "ca", "e.g", "i.e", "vs", "st",
+})
+_SENTENCE_END = re.compile(r"(?<=[.!?…])[\"'”’)]*\s+(?=[\"'“‘(]?[^\W\d_]|\d)")
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split on sentence punctuation, keeping abbreviations like 'bijv.' intact."""
+    sentences: list[str] = []
+    start = 0
+    for match in _SENTENCE_END.finditer(text):
+        candidate = text[start:match.start()].rstrip()
+        last_word = candidate.rsplit(None, 1)[-1] if candidate else ""
+        if last_word.endswith(".") and last_word[:-1].casefold().lstrip("(\"'“‘") in NON_TERMINAL_ABBREVIATIONS:
+            continue
+        sentences.append(text[start:match.end()].strip())
+        start = match.end()
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
+
+
+def _starts_with(sentence: str, openers: Sequence[str]) -> bool:
+    lowered = sentence.casefold().lstrip("\"'“‘(")
+    return any(
+        lowered.startswith(opener) and (len(lowered) == len(opener) or not lowered[len(opener)].isalnum())
+        for opener in openers
+    )
+
+
+def format_paragraphs(text: str) -> str:
+    """Break one dictated block into short, readable chat paragraphs.
+
+    Only whitespace between sentences changes; the words stay exactly as
+    transcribed. Short messages and text that already has line breaks are
+    returned unchanged.
+    """
+    if "\n" in text or len(text) < PARAGRAPH_MIN_CHARACTERS:
+        return text
+    sentences = split_sentences(text)
+    if len(sentences) < 3:
+        return text
+
+    # First cut where a new thought or the closing starts, then split the
+    # remaining runs into evenly sized blocks.
+    runs: list[list[str]] = [[]]
+    for sentence in sentences:
+        run = runs[-1]
+        length = sum(len(part) + 1 for part in run)
+        if run and (
+            _starts_with(sentence, CLOSING_OPENERS)
+            or (length >= PARAGRAPH_TOPIC_MIN_CHARACTERS and _starts_with(sentence, TOPIC_SHIFT_OPENERS))
+        ):
+            runs.append([])
+        runs[-1].append(sentence)
+    paragraphs = [paragraph for run in runs for paragraph in _balanced_chunks(run)]
+    return PARAGRAPH_SEPARATOR.join(" ".join(paragraph) for paragraph in paragraphs)
+
+
+def _balanced_chunks(sentences: list[str]) -> list[list[str]]:
+    total = sum(len(sentence) + 1 for sentence in sentences)
+    count = max(
+        math.ceil(len(sentences) / PARAGRAPH_MAX_SENTENCES),
+        math.ceil(total / PARAGRAPH_TARGET_CHARACTERS),
+    )
+    count = max(1, min(count, len(sentences)))
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    done = 0
+    for index, sentence in enumerate(sentences):
+        size = len(sentence) + 1
+        remaining_sentences = len(sentences) - index
+        remaining_chunks = count - len(chunks)
+        target = (total - done) / remaining_chunks
+        filled = sum(len(part) + 1 for part in current)
+        # Close the block when adding this sentence overshoots the even share
+        # more than stopping short does, or when the rest needs one each.
+        if current and remaining_chunks > 1 and (
+            remaining_sentences < remaining_chunks
+            or abs(filled + size - target) > abs(filled - target)
+            or len(current) >= PARAGRAPH_MAX_SENTENCES
+        ):
+            chunks.append(current)
+            done += filled
+            current = []
+        current.append(sentence)
+    chunks.append(current)
+    return chunks
+
+
+def clipboard_text(text: str) -> str:
+    """Windows apps expect CRLF line breaks on the clipboard."""
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")

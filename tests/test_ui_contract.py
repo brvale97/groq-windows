@@ -44,6 +44,7 @@ class ExistingUiContractTests(unittest.TestCase):
             "Microfoon",
             "Transcriptie automatisch plakken",
             "Punt aan het einde verwijderen",
+            "Automatisch alinea's maken",
             "Start automatisch met Windows",
             "Microfoon testen",
             "Terugluisteren",
@@ -63,6 +64,13 @@ class ExistingUiContractTests(unittest.TestCase):
             self.assertIn(snippet, config_source)
         self.assertIn("remove_final_period=session.remove_final_period", ENGINE_SOURCE)
         self.assertIn("remove_final_period=self.remove_period_switch.isChecked()", SETTINGS_SOURCE)
+
+    def test_paragraph_option_defaults_to_on_and_is_wired(self) -> None:
+        config_source = (ROOT / "config_store.py").read_text(encoding="utf-8")
+        self.assertIn("auto_paragraphs: bool = True", config_source)
+        self.assertIn('auto_paragraphs=bool(data.get("auto_paragraphs", True))', config_source)
+        self.assertEqual(ENGINE_SOURCE.count("auto_paragraphs=config.auto_paragraphs"), 2)
+        self.assertIn("auto_paragraphs=self.paragraphs_switch.isChecked()", SETTINGS_SOURCE)
 
     def test_startup_splash_waits_for_the_visible_tray_icon(self) -> None:
         for snippet in (
@@ -95,7 +103,7 @@ class HistoryContractTests(unittest.TestCase):
         end = ENGINE_SOURCE.index("    def transcribe(", start)
         body = ENGINE_SOURCE[start:end]
         self.assertLess(
-            body.index("pyperclip.copy(pasted_text)"),
+            body.index("pyperclip.copy(clipboard_text(pasted_text))"),
             body.index("self.transcript_callback(text)"),
         )
         self.assertIn('("Geschiedenis", lambda: self.open_settings("history"))', APP_SOURCE)
@@ -108,7 +116,7 @@ class HistoryContractTests(unittest.TestCase):
         end = ENGINE_SOURCE.index("    def transcribe(", start)
         body = ENGINE_SOURCE[start:end]
         self.assertIn("pasted_text = append_trailing_space(text)", body)
-        self.assertIn("pyperclip.copy(pasted_text)", body)
+        self.assertIn("pyperclip.copy(clipboard_text(pasted_text))", body)
         self.assertIn("self.transcript_callback(text)", body)
 
 

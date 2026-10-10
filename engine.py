@@ -36,7 +36,9 @@ from dictation_core import (
     append_trailing_space,
     apply_final_period_preference,
     apply_word_replacements,
+    clipboard_text,
     compose_transcription_prompt,
+    format_paragraphs,
 )
 from history import RecordingEntry, RecordingHistory
 from microphone_test import windows_audio_thread
@@ -264,6 +266,7 @@ class RecordingSession:
     paste_after_transcription: bool
     remove_final_period: bool
     client: Groq
+    auto_paragraphs: bool = True
     wasapi: bool = False
 
 
@@ -375,6 +378,7 @@ class DictationEngine:
                     paste_after_transcription=config.paste_after_transcription,
                     remove_final_period=config.remove_final_period,
                     client=self.client,
+                    auto_paragraphs=config.auto_paragraphs,
                     wasapi=config.input_device.startswith("wasapi:"),
                 )
 
@@ -548,6 +552,7 @@ class DictationEngine:
                 prompt=compose_transcription_prompt(config.prompt, config.custom_words),
                 word_replacements=config.word_replacements, paste_after_transcription=False,
                 remove_final_period=config.remove_final_period, client=self.client,
+                auto_paragraphs=config.auto_paragraphs,
             )
             self.state = "processing"
         try:
@@ -615,6 +620,8 @@ class DictationEngine:
                 self.transcribe(session, wav_path).strip(),
                 session.word_replacements,
             )
+            if session.auto_paragraphs:
+                text = format_paragraphs(text)
             text = apply_final_period_preference(
                 text,
                 remove_final_period=session.remove_final_period,
@@ -629,7 +636,7 @@ class DictationEngine:
 
             self.update_recording(recording, status="done", text=text)
             pasted_text = append_trailing_space(text)
-            pyperclip.copy(pasted_text)
+            pyperclip.copy(clipboard_text(pasted_text))
             self.notify(f"Transcriptie klaar in {elapsed:.1f}s. Tekst staat op je klembord.")
             try:
                 self.transcript_callback(text)

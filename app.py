@@ -37,7 +37,7 @@ import config_store  # noqa: E402
 import updater  # noqa: E402
 from audio_player import AudioPlayer, PlaybackStatus  # noqa: E402
 from config_store import APP_NAME, Config, load_config, save_config, setup_logging  # noqa: E402
-from dictation_core import DEFAULT_DEVICE_LABEL  # noqa: E402
+from dictation_core import DEFAULT_DEVICE_LABEL, clipboard_text  # noqa: E402
 from engine import (  # noqa: E402
     WAVE_BAR_COUNT,
     WAVE_TICK_MS,
@@ -777,7 +777,7 @@ class TrayApp:
         return self.player.status()
 
     def copy_text(self, text: str) -> None:
-        pyperclip.copy(text)
+        pyperclip.copy(clipboard_text(text))
 
     def clear_history(self) -> None:
         with self.engine.lock:
