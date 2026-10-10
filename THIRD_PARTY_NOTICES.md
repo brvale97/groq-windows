@@ -26,5 +26,6 @@ Python (PSF License), NumPy, Pillow, sounddevice/PortAudio, groq, keyring,
 pyautogui, pyperclip and truststore are bundled under their own licenses;
 see the `licenses` folder.
 
-Local speech detection uses webrtcvad-wheels (MIT) and its WebRTC voice activity
-detector (BSD). Both license texts are included in the package's license folder.
+Local speech detection uses the Silero VAD model (MIT) through ONNX Runtime
+(MIT). Silero's license ships with the model in `_internal\assets`; ONNX Runtime
+and its dependencies' license texts are included in the `licenses` folder.

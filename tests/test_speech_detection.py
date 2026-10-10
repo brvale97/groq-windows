@@ -30,10 +30,23 @@ class SpeechDetectionTests(unittest.TestCase):
         return result
 
     def test_silence_dc_offset_and_low_noise_are_rejected(self):
-        noise = np.random.default_rng(42).normal(0, 15, 32000)
-        for samples in (np.zeros(32000), np.full(32000, 4000), noise):
+        random = np.random.default_rng(42)
+        for samples in (np.zeros(32000), np.full(32000, 4000),
+                        random.normal(0, 15, 32000), random.normal(0, 1000, 32000)):
             with self.subTest(kind=str(samples[:3])):
                 self.assertFalse(self.check(samples, 16000))
+
+    def test_microphone_startup_transient_with_noise_is_not_speech(self):
+        # DC settling at stream startup was counted as speech by the first VAD.
+        time = np.arange(48000) / 16000
+        transient = 30000 * np.exp(-time / 0.06)
+        noise = np.random.default_rng(42).normal(0, 65, len(time))
+        self.assertFalse(self.check(transient + noise, 16000))
+
+    def test_each_recording_starts_with_fresh_model_state(self):
+        self.assertTrue(self.check(self.speech))
+        self.assertFalse(self.check(np.zeros(16000), 16000))
+        self.assertTrue(self.check(self.speech.astype(float) * 0.01))
 
     def test_speech_and_quiet_speech_pass(self):
         self.assertTrue(self.check(self.speech))

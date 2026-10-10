@@ -378,6 +378,17 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.clipboard.assert_not_called()
         self.paste.assert_not_called()
 
+    def test_detector_failure_keeps_audio_and_skips_transcription(self) -> None:
+        with mock.patch("speech_detection._model_session", side_effect=RuntimeError("Detector ontbreekt")):
+            self.engine.transcribe_and_output(self.session, self.frames())
+        entry = self.engine.recordings.entries[0]
+        self.assertEqual(entry.status, "failed")
+        self.assertIn("Detector ontbreekt", entry.error)
+        self.assertTrue(self.engine.recordings.audio_path(entry).exists())
+        self.engine.client.audio.transcriptions.create.assert_not_called()
+        self.clipboard.assert_not_called()
+        self.paste.assert_not_called()
+
     def test_long_dictation_is_pasted_as_paragraphs_unless_disabled(self) -> None:
         sentences = [f"Dit is zin nummer {index} van een langer gesproken bericht." for index in range(1, 7)]
         response = " ".join(sentences) + " Groetjes."

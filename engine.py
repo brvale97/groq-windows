@@ -42,7 +42,7 @@ from dictation_core import (
 )
 from history import RecordingEntry, RecordingHistory
 from microphone_test import windows_audio_thread
-from speech_detection import NoSpeechDetected, contains_speech, response_is_silence
+from speech_detection import NoSpeechDetected, contains_speech, prepare_speech_detection, response_is_silence
 
 try:
     import winsound
@@ -296,6 +296,9 @@ class DictationEngine:
         self.state = "idle"
         self.lock = threading.Lock()
         self.stream_transition_lock = threading.Lock()
+
+        prepare_speech_detection()
+        logging.info("Spraakdetectie klaar: Silero VAD, lokaal op CPU")
 
         pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0

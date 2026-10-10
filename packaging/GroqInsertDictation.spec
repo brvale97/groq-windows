@@ -45,7 +45,7 @@ EXCLUDED_DATA = re.compile(r"[\\/](translations|qml)[\\/]", re.I)
 a = Analysis(
     [str(ROOT / "app.py")],
     pathex=[str(ROOT)],
-    hookspath=[str(ROOT / "packaging" / "hooks")],
+    datas=[(str(ROOT / "assets"), "assets")],
     excludes=[
         "tkinter", "_tkinter", "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick", "unittest.mock",
         "PIL._avif", "PIL.AvifImagePlugin",

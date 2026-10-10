@@ -66,10 +66,13 @@ To run the tests:
 ## Settings
 
 <!-- Source: Bram's empty-audio report, 2026-10-10. Scope: dictation and recording retries. -->
-In **0.2.3**, local WebRTC voice activity detection checks for speech, including
+In **0.2.3**, local Silero voice activity detection checks for speech, including
 on retries. Quiet speech and short words can pass without requiring a large
-speech-to-silence ratio. Pure tones (including the start cue) do not count as
-speech. Groq's `verbose_json` silence/confidence metadata provides a second
+speech-to-silence ratio. The bundled model runs on the CPU, with no detector
+downloads or cloud requests. It distinguishes speech from microphone startup
+transients, noise and the start cue; the regression checks include the two
+actual silent laptop recordings reported on 2026-10-10 (kept outside Git).
+Groq's `verbose_json` silence/confidence metadata provides a second
 check. These checks reduce empty-audio hallucinations; speech detection is not
 perfect. No transcript phrases are blacklisted, so spoken "Thank you" remains
 valid. Rejected audio stays in History and the app shows **Geen spraak gedetecteerd**.
