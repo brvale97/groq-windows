@@ -63,7 +63,7 @@ Assert-NativeSuccess "App-versie uitlezen"
 $sources = [ordered]@{}
 foreach ($file in @(
     "app.py", "audio_player.py", "branding.py", "config_store.py", "dictation_core.py", "engine.py", "history.py",
-    "hotkeys.py", "microphone_test.py", "speech_detection.py", "settings_ui.py", "ui_theme.py", "updater.py", "windows_paste.py", "windows_services.py",
+    "hotkeys.py", "microphone_test.py", "speech_detection.py", "settings_ui.py", "text_cleanup.py", "ui_theme.py", "updater.py", "windows_paste.py", "windows_services.py",
     "requirements.txt", "requirements-build.txt", "bootstrap.ps1", "build-app.ps1",
     "packaging\GroqInsertDictation.spec", "packaging\collect_licenses.py", "packaging\make_zip.py", "THIRD_PARTY_NOTICES.md",
     "assets\silero_vad.onnx", "assets\SILERO_LICENSE.txt", "assets\README.md",

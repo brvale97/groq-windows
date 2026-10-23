@@ -52,6 +52,7 @@ from dictation_core import (
 from history import MAX_HISTORY_ENTRIES, MAX_RECORDING_ENTRIES, HistoryEntry, RecordingEntry
 from hotkeys import HotkeyError, hotkey_from_key_press, normalize_hotkey_text, validate_hotkey
 from microphone_test import MicrophoneTestStatus
+from text_cleanup import DEFAULT_CLEANUP_MODEL, DEFAULT_CLEANUP_PROMPT, MAX_CLEANUP_PROMPT_LENGTH, normalize_cleanup_prompt
 from ui_theme import app_icon, current_theme, draw_glyph, icon, repolish
 
 __all__ = ["DEFAULT_DEVICE_LABEL", "SettingsController", "SettingsWindow"]
@@ -59,6 +60,10 @@ __all__ = ["DEFAULT_DEVICE_LABEL", "SettingsController", "SettingsWindow"]
 MODEL_OPTIONS = (
     ("whisper-large-v3-turbo", "Turbo: snelste antwoord, uitstekend voor dagelijks dicteren."),
     ("whisper-large-v3", "V3: iets trager, hoogste nauwkeurigheid bij moeilijke audio."),
+)
+CLEANUP_MODEL_OPTIONS = (
+    ("openai/gpt-oss-120b", "GPT-OSS 120B: aanbevolen. Houdt je taal vast en laat opdrachten in je dictaat staan."),
+    ("openai/gpt-oss-20b", "GPT-OSS 20B: iets sneller, maar mist vaker een verbetering en verandert soms woorden."),
 )
 LANGUAGE_OPTIONS = (
     ("nl", "Nederlands"),
@@ -488,6 +493,7 @@ class SettingsWindow(QWidget):
         ("dictate", "Dicteren", "Jouw stem, direct op de juiste plek.", "mic"),
         ("history", "Geschiedenis", f"Je laatste {MAX_RECORDING_ENTRIES} opnames en {MAX_HISTORY_ENTRIES} transcripties.", "history"),
         ("recognition", "Herkenning", "Help Groq jouw taal en context beter te begrijpen.", "sparkles"),
+        ("cleanup", "AI-opschoning", "Haal eh's, herhalingen en verbeteringen uit je tekst.", "wand"),
         ("dictionary", "Woordenboek", "Eigen namen, vaktermen en vaste correcties.", "book"),
         ("connection", "Verbinding", "Je Groq API key en het transcriptiemodel.", "key"),
         ("about", "Over", "Versie, updates en hulpmiddelen.", "info"),
@@ -646,6 +652,7 @@ class SettingsWindow(QWidget):
             "dictate": self._build_dictate_page,
             "history": self._build_history_page,
             "recognition": self._build_recognition_page,
+            "cleanup": self._build_cleanup_page,
             "dictionary": self._build_dictionary_page,
             "connection": self._build_connection_page,
             "about": self._build_about_page,
@@ -1009,6 +1016,54 @@ class SettingsWindow(QWidget):
         page.addWidget(prompt_card, 1)
         self._update_prompt_counter()
 
+    def _build_cleanup_page(self, page: QVBoxLayout) -> None:
+        config = self.original
+        cleanup_card = Card(
+            "AI-opschoning",
+            "Na de transcriptie haalt een taalmodel bij Groq \"eh\", \"uh\" en herhalingen weg, verwerkt "
+            "verbeteringen zoals \"nee wacht, ik bedoel\" en zet de leestekens goed. Je taal blijft behouden. "
+            "Dat kost ongeveer een halve seconde. Lukt het niet, dan krijg je de letterlijke tekst.",
+        )
+        self.cleanup_switch = ToggleSwitch("AI-opschoning gebruiken", config.cleanup_enabled)
+        self.cleanup_switch.toggled.connect(self._cleanup_toggled)
+        cleanup_card.body.addWidget(self.cleanup_switch)
+        page.addWidget(cleanup_card)
+
+        model_card = Card("Model", "Draait bij Groq met dezelfde API key. Je kunt ook een ander Groq-model-ID invullen.")
+        self.cleanup_model_combo = ComboBox()
+        self.cleanup_model_combo.setEditable(True)
+        names = [name for name, _ in CLEANUP_MODEL_OPTIONS]
+        if config.cleanup_model not in names:
+            names.append(config.cleanup_model)
+        self.cleanup_model_combo.addItems(names)
+        self.cleanup_model_combo.setEditText(config.cleanup_model)
+        self.cleanup_model_combo.editTextChanged.connect(self._cleanup_model_changed)
+        self.cleanup_model_combo.setMaximumWidth(360)
+        model_card.body.addWidget(self.cleanup_model_combo)
+        self.cleanup_model_hint = label("", "hint", wrap=True)
+        model_card.body.addWidget(self.cleanup_model_hint)
+        page.addWidget(model_card)
+
+        prompt_card = Card(
+            "Systeemprompt",
+            "De instructie voor het taalmodel. Je dictaat gaat er apart achteraan, tussen transcript-tags. "
+            "Woorden uit je woordenboek worden automatisch toegevoegd.",
+        )
+        self.cleanup_prompt_text = QPlainTextEdit(config.cleanup_prompt or DEFAULT_CLEANUP_PROMPT)
+        self.cleanup_prompt_text.setMinimumHeight(220)
+        self.cleanup_prompt_text.textChanged.connect(self._cleanup_prompt_changed)
+        prompt_card.body.addWidget(self.cleanup_prompt_text, 1)
+        self.cleanup_prompt_status = label("", "hint", wrap=True)
+        self.cleanup_reset_button = button("Standaardprompt herstellen", variant="ghost", glyph="retry")
+        self.cleanup_reset_button.clicked.connect(lambda: self.cleanup_prompt_text.setPlainText(DEFAULT_CLEANUP_PROMPT))
+        row = hbox(self.cleanup_prompt_status, self.cleanup_reset_button, spacing=12)
+        row.setStretch(0, 1)
+        prompt_card.body.addLayout(row)
+        page.addWidget(prompt_card, 1)
+        self._update_cleanup_model_hint()
+        self._update_cleanup_prompt_status()
+        self._cleanup_toggled(config.cleanup_enabled)
+
     def _build_dictionary_page(self, page: QVBoxLayout) -> None:
         columns = QHBoxLayout()
         columns.setSpacing(12)
@@ -1148,6 +1203,37 @@ class SettingsWindow(QWidget):
     def _update_prompt_counter(self) -> None:
         length = len(self.prompt_value())
         self.prompt_counter.setText(f"{length} tekens" if length else "Nog geen prompt ingesteld.")
+
+    def _cleanup_toggled(self, checked: bool) -> None:
+        for widget in (self.cleanup_model_combo, self.cleanup_prompt_text, self.cleanup_reset_button):
+            widget.setEnabled(checked)
+        self.mark_dirty()
+
+    def _cleanup_model_changed(self, _text: str) -> None:
+        self._update_cleanup_model_hint()
+        self.mark_dirty()
+
+    def _update_cleanup_model_hint(self) -> None:
+        name = self.cleanup_model_combo.currentText().strip()
+        self.cleanup_model_hint.setText(
+            dict(CLEANUP_MODEL_OPTIONS).get(name, "Eigen model: vul het model-ID in zoals Groq het noemt.")
+        )
+
+    def cleanup_prompt_value(self) -> str:
+        return self.cleanup_prompt_text.toPlainText().strip()
+
+    def _cleanup_prompt_changed(self) -> None:
+        self._update_cleanup_prompt_status()
+        self.mark_dirty()
+
+    def _update_cleanup_prompt_status(self) -> None:
+        prompt = self.cleanup_prompt_value()
+        if not prompt or prompt == DEFAULT_CLEANUP_PROMPT:
+            text = "Standaardprompt." if prompt else "Leeg: de standaardprompt wordt gebruikt."
+        else:
+            text = f"Eigen prompt, {len(prompt)} van {MAX_CLEANUP_PROMPT_LENGTH} tekens."
+        self.cleanup_prompt_status.setText(text)
+        self.cleanup_reset_button.setVisible(bool(prompt) and prompt != DEFAULT_CLEANUP_PROMPT)
 
     def _language_changed(self, _text: str) -> None:
         self._update_language_hint()
@@ -1471,6 +1557,9 @@ class SettingsWindow(QWidget):
             paste_after_transcription=self.paste_switch.isChecked(),
             remove_final_period=self.remove_period_switch.isChecked(),
             auto_paragraphs=self.paragraphs_switch.isChecked(),
+            cleanup_enabled=self.cleanup_switch.isChecked(),
+            cleanup_model=self.cleanup_model_combo.currentText().strip() or DEFAULT_CLEANUP_MODEL,
+            cleanup_prompt=normalize_cleanup_prompt(self.cleanup_prompt_value()),
             autostart=self.autostart_switch.isChecked(),
             # If Credential Manager could not be read at startup, an unchanged
             # fallback value must not overwrite a newer secret. Deliberately

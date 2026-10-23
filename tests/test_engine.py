@@ -231,7 +231,8 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.directory = Path(temp.name)
         self.history = TranscriptionHistory(self.directory / "history.json")
         self.engine = engine.DictationEngine.__new__(engine.DictationEngine)
-        self.engine.config = Config(api_key="test-only", sample_rate=16_000, channels=1)
+        # Literal transcripts here; AiCleanupTests cover the cleanup.
+        self.engine.config = Config(api_key="test-only", sample_rate=16_000, channels=1, cleanup_enabled=False)
         self.engine.client = mock.Mock()
         self.engine.recordings = RecordingHistory(self.directory / "recordings")
         self.engine.recording_callback = mock.Mock()
@@ -507,6 +508,96 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.assertEqual(self.engine.state, "idle")
         messages = [str(call.args[0]) for call in self.engine.status_callback.call_args_list]
         self.assertTrue(any(str(path) in message for message in messages))
+
+
+class AiCleanupTests(unittest.TestCase):
+    """Whisper text goes through the chat model before paragraphs, clipboard and paste."""
+
+    frames = RecordingRecoveryTests.frames
+    run_retry_synchronously = RecordingRecoveryTests.run_retry_synchronously
+
+    def setUp(self) -> None:
+        RecordingRecoveryTests.setUp(self)
+        self.engine.client.with_options.return_value = self.engine.client
+        self.session = dataclasses.replace(
+            self.session, word_replacements=(("Grok", "Groq"),),
+            cleanup_model="openai/gpt-oss-120b", cleanup_prompt="Maak schoon.",
+        )
+        self.engine.client.audio.transcriptions.create.return_value = mock.Mock(
+            text="Eh, ik ik wil Grok testen.", segments=None,
+        )
+
+    def answer(self, content, finish_reason="stop"):
+        choice = mock.Mock(finish_reason=finish_reason)
+        choice.message.content = content
+        self.engine.client.chat.completions.create.return_value = mock.Mock(choices=[choice])
+
+    def test_cleaned_text_is_pasted_and_stored(self) -> None:
+        self.answer("Ik wil Groq testen.")
+        self.engine.transcribe_and_output(self.session, self.frames())
+        kwargs = self.engine.client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "openai/gpt-oss-120b")
+        self.assertEqual(kwargs["messages"][0], {"role": "system", "content": "Maak schoon."})
+        # Replacements run first, so the model already sees the right spelling.
+        self.assertEqual(kwargs["messages"][1]["content"], "<transcript>\nEh, ik ik wil Groq testen.\n</transcript>")
+        self.engine.client.with_options.assert_called_with(max_retries=0)
+        self.assertEqual(self.engine.recordings.entries[0].text, "Ik wil Groq testen.")
+        self.assertEqual(self.history.entries[0].text, "Ik wil Groq testen.")
+        self.clipboard.assert_called_once_with("Ik wil Groq testen. ")
+        self.paste.assert_called_once_with()
+        self.assertNotIn(mock.call("cleanup_skipped"), self.engine.state_callback.call_args_list)
+        messages = [str(call.args[0]) for call in self.engine.status_callback.call_args_list]
+        self.assertTrue(any(message.startswith("Transcriptie opgeschoond") for message in messages))
+
+    def test_failed_cleanup_pastes_the_literal_transcript_and_says_so(self) -> None:
+        self.engine.client.chat.completions.create.side_effect = RuntimeError("Request timed out.")
+        self.engine.transcribe_and_output(self.session, self.frames())
+        self.assertEqual(self.engine.recordings.entries[0].status, "done")
+        self.assertEqual(self.engine.recordings.entries[0].text, "Eh, ik ik wil Groq testen.")
+        self.clipboard.assert_called_once_with("Eh, ik ik wil Groq testen. ")
+        self.paste.assert_called_once_with()
+        self.engine.state_callback.assert_called_with("cleanup_skipped")
+        self.assertEqual(self.engine.state, "idle")
+
+    def test_an_answer_instead_of_a_cleanup_is_rejected(self) -> None:
+        self.answer("Natuurlijk! " + "Hier is een uitgebreid antwoord op je vraag. " * 12)
+        self.engine.transcribe_and_output(self.session, self.frames())
+        self.clipboard.assert_called_once_with("Eh, ik ik wil Groq testen. ")
+        self.engine.state_callback.assert_called_with("cleanup_skipped")
+
+    def test_cleanup_runs_before_paragraphs_and_final_period(self) -> None:
+        sentences = " ".join(f"Dit is zin nummer {index} van een langer gesproken bericht." for index in range(1, 7))
+        self.engine.client.audio.transcriptions.create.return_value.text = "Eh, " + sentences + " Eh, groetjes."
+        self.answer(sentences + " Groetjes.")
+        session = dataclasses.replace(self.session, remove_final_period=True)
+        self.engine.transcribe_and_output(session, self.frames())
+        stored = self.engine.recordings.entries[0].text
+        self.assertIn(PARAGRAPH_SEPARATOR + "Groetjes", stored)
+        self.assertFalse(stored.endswith("."))
+
+    def test_disabled_cleanup_never_calls_the_chat_model(self) -> None:
+        self.engine.transcribe_and_output(dataclasses.replace(self.session, cleanup_model=""), self.frames())
+        self.engine.client.chat.completions.create.assert_not_called()
+        self.clipboard.assert_called_once_with("Eh, ik ik wil Groq testen. ")
+
+    def test_sessions_take_cleanup_settings_from_the_config(self) -> None:
+        config = Config(custom_words=("Clinon",), cleanup_prompt="Eigen prompt.")
+        settings = engine.cleanup_session_settings(config)
+        self.assertEqual(settings["cleanup_model"], "openai/gpt-oss-120b")
+        self.assertTrue(settings["cleanup_prompt"].startswith("Eigen prompt."))
+        self.assertIn("Clinon", settings["cleanup_prompt"])
+        self.assertEqual(engine.cleanup_session_settings(dataclasses.replace(config, cleanup_enabled=False)), {})
+
+    def test_retry_from_history_also_cleans_up(self) -> None:
+        self.engine.client.audio.transcriptions.create.side_effect = RuntimeError("Network unavailable")
+        self.engine.transcribe_and_output(self.session, self.frames())
+        entry = self.engine.recordings.entries[0]
+        self.engine.client.audio.transcriptions.create.side_effect = None
+        self.engine.config = dataclasses.replace(self.engine.config, cleanup_enabled=True)
+        self.answer("Ik wil Groq testen.")
+        self.run_retry_synchronously(entry.id)
+        self.assertEqual(self.engine.recordings.get(entry.id).text, "Ik wil Groq testen.")
+        self.paste.assert_not_called()
 
 
 class QaClientTests(unittest.TestCase):

@@ -45,6 +45,7 @@ from dictation_core import (
 from history import RecordingEntry, RecordingHistory
 from microphone_test import windows_audio_thread
 from speech_detection import NoSpeechDetected, prepare_speech_detection, response_is_silence, speech_upload
+from text_cleanup import CleanupError, clean_transcript, compose_cleanup_prompt
 from windows_paste import paste_clipboard
 
 try:
@@ -272,7 +273,19 @@ class RecordingSession:
     client: Groq
     auto_paragraphs: bool = True
     wasapi: bool = False
+    # Empty model: no AI cleanup, the literal transcript is used.
+    cleanup_model: str = ""
+    cleanup_prompt: str = ""
 
+
+
+def cleanup_session_settings(config: Config) -> dict[str, str]:
+    if not config.cleanup_enabled or not config.cleanup_model.strip():
+        return {}
+    return {
+        "cleanup_model": config.cleanup_model.strip(),
+        "cleanup_prompt": compose_cleanup_prompt(config.cleanup_prompt, config.custom_words),
+    }
 
 
 class DictationEngine:
@@ -384,6 +397,7 @@ class DictationEngine:
                     client=self.client,
                     auto_paragraphs=config.auto_paragraphs,
                     wasapi=config.input_device.startswith("wasapi:"),
+                    **cleanup_session_settings(config),
                 )
 
             if session is None:
@@ -556,7 +570,7 @@ class DictationEngine:
                 prompt=compose_transcription_prompt(config.prompt, config.custom_words),
                 word_replacements=config.word_replacements, paste_after_transcription=False,
                 remove_final_period=config.remove_final_period, client=self.client,
-                auto_paragraphs=config.auto_paragraphs,
+                auto_paragraphs=config.auto_paragraphs, **cleanup_session_settings(config),
             )
             self.state = "processing"
         try:
@@ -631,6 +645,10 @@ class DictationEngine:
                 self.transcribe(session, wav_path, upload).strip(),
                 session.word_replacements,
             )
+            cleanup_wanted = bool(text and session.cleanup_model and not isinstance(session.client, QaClient))
+            cleaned = False
+            if cleanup_wanted:
+                text, cleaned = self.clean_up(session, text)
             if session.auto_paragraphs:
                 text = format_paragraphs(text)
             text = apply_final_period_preference(
@@ -648,7 +666,8 @@ class DictationEngine:
             self.update_recording(recording, status="done", text=text)
             pasted_text = append_trailing_space(text)
             pyperclip.copy(clipboard_text(pasted_text))
-            self.notify(f"Transcriptie klaar in {elapsed:.1f}s. Tekst staat op je klembord.")
+            done = "Transcriptie opgeschoond" if cleaned else "Transcriptie klaar"
+            self.notify(f"{done} in {elapsed:.1f}s. Tekst staat op je klembord.")
             try:
                 self.transcript_callback(text)
             except Exception:
@@ -662,6 +681,9 @@ class DictationEngine:
                     self.notify(f"Automatisch plakken mislukte, maar de tekst staat op je klembord: {exc}")
 
             play_sound("success.wav")
+            if cleanup_wanted and not cleaned:
+                self.emit_state("cleanup_skipped")
+                show_idle_bubble = False
         except NoSpeechDetected as exc:
             if recording is not None:
                 self.update_recording(recording, status="failed", error=str(exc))
@@ -686,6 +708,20 @@ class DictationEngine:
                 self.emit_state("idle")
             self.recording_changed()
             self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")
+
+    def clean_up(self, session: RecordingSession, text: str) -> tuple[str, bool]:
+        """AI cleanup, or the literal transcript when it fails. Never loses the dictation."""
+        started_at = time.perf_counter()
+        try:
+            cleaned = clean_transcript(
+                session.client, text, model=session.cleanup_model, system_prompt=session.cleanup_prompt,
+            )
+        except CleanupError as exc:
+            logging.warning("AI cleanup skipped: %s", exc.__cause__ or exc)
+            self.notify(f"{exc}. Letterlijke tekst gebruikt.")
+            return text, False
+        logging.info("AI cleanup with %s in %.2fs", session.cleanup_model, time.perf_counter() - started_at)
+        return cleaned, True
 
     def transcribe(
         self, session: RecordingSession, wav_path: Path, upload: tuple[str, bytes] | Path | None = None,

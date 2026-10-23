@@ -18,8 +18,9 @@ from pathlib import Path
 import keyring
 
 from dictation_core import normalize_custom_words, normalize_word_replacements
+from text_cleanup import DEFAULT_CLEANUP_MODEL, normalize_cleanup_prompt
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
@@ -94,6 +95,10 @@ class Config:
     paste_after_transcription: bool = True
     remove_final_period: bool = False
     auto_paragraphs: bool = True
+    cleanup_enabled: bool = True
+    cleanup_model: str = DEFAULT_CLEANUP_MODEL
+    # Empty means the built-in system prompt, so improvements to it still apply.
+    cleanup_prompt: str = ""
     autostart: bool = True
     keyring_read_succeeded: bool = field(default=True, repr=False, compare=False)
 
@@ -143,6 +148,14 @@ def positive_int(value, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def stored_cleanup_prompt(value) -> str:
+    try:
+        return normalize_cleanup_prompt(value)
+    except ValueError:
+        logging.warning("Ignoring a cleanup prompt that is too long.")
+        return ""
+
+
 def load_config() -> Config:
     data: dict = {}
     if SETTINGS_PATH.exists():
@@ -183,6 +196,9 @@ def load_config() -> Config:
         ),
         remove_final_period=bool(data.get("remove_final_period", False)),
         auto_paragraphs=bool(data.get("auto_paragraphs", True)),
+        cleanup_enabled=bool(data.get("cleanup_enabled", True)),
+        cleanup_model=str(data.get("cleanup_model") or DEFAULT_CLEANUP_MODEL),
+        cleanup_prompt=stored_cleanup_prompt(data.get("cleanup_prompt")),
         autostart=bool(data.get("autostart", True)),
         keyring_read_succeeded=keyring_read_succeeded,
     )

@@ -333,6 +333,18 @@ def draw_glyph(painter: QPainter, name: str, rect: QRectF, color: QColor) -> Non
         painter.drawPath(star)
         painter.drawLine(p(18, 15), p(18, 21))
         painter.drawLine(p(15, 18), p(21, 18))
+    elif name == "wand":
+        painter.drawLine(p(4, 20), p(14, 10))
+        star = QPainterPath(p(17, 3))
+        star.cubicTo(p(17.5, 6), p(18, 6.5), p(21, 7))
+        star.cubicTo(p(18, 7.5), p(17.5, 8), p(17, 11))
+        star.cubicTo(p(16.5, 8), p(16, 7.5), p(13, 7))
+        star.cubicTo(p(16, 6.5), p(16.5, 6), p(17, 3))
+        painter.drawPath(star)
+        painter.drawLine(p(7, 4), p(7, 8))
+        painter.drawLine(p(5, 6), p(9, 6))
+        painter.drawLine(p(19, 15), p(19, 19))
+        painter.drawLine(p(17, 17), p(21, 17))
     elif name == "book":
         painter.drawRoundedRect(r(5, 3, 14, 18), 2 * unit, 2 * unit)
         painter.drawLine(p(8.5, 3), p(8.5, 21))

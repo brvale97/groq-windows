@@ -328,6 +328,51 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertFalse(saved.autostart)
         self.assertEqual((saved.language, saved.prompt, saved.model, saved.api_key), ("en", "Projectoverleg", "whisper-large-v3", "new-key"))
 
+    def test_cleanup_settings_round_trip(self):
+        import text_cleanup
+
+        settings_ui, controller, window = self.open_window(make_config(api_key="key"))
+        window.select_page("cleanup")
+        self.pump()
+        self.assertTrue(window.cleanup_switch.isChecked())
+        self.assertEqual(window.cleanup_model_combo.currentText(), "openai/gpt-oss-120b")
+        self.assertEqual(window.cleanup_prompt_value(), text_cleanup.DEFAULT_CLEANUP_PROMPT)
+        self.assertEqual(window.cleanup_prompt_status.text(), "Standaardprompt.")
+        self.assertFalse(window.cleanup_reset_button.isVisible())
+
+        window.cleanup_model_combo.setCurrentText("openai/gpt-oss-20b")
+        self.assertIn("20B", window.cleanup_model_hint.text())
+        window.cleanup_prompt_text.setPlainText("Maak er nette zinnen van.")
+        self.assertTrue(window.dirty)
+        self.assertEqual(window.cleanup_prompt_status.text(), "Eigen prompt, 25 van 8000 tekens.")
+        self.assertTrue(window.cleanup_reset_button.isVisible())
+        window.save()
+        saved = controller.applied[-1]
+        self.assertEqual((saved.cleanup_enabled, saved.cleanup_model, saved.cleanup_prompt),
+                         (True, "openai/gpt-oss-20b", "Maak er nette zinnen van."))
+
+    def test_cleanup_can_be_switched_off_and_prompt_reset(self):
+        _, controller, window = self.open_window(make_config(api_key="key", cleanup_prompt="Eigen."))
+        window.select_page("cleanup")
+        self.pump()
+        self.assertEqual(window.cleanup_prompt_value(), "Eigen.")
+        window.cleanup_reset_button.click()
+        self.assertEqual(window.cleanup_prompt_status.text(), "Standaardprompt.")
+        window.cleanup_switch.click()
+        self.assertFalse(window.cleanup_prompt_text.isEnabled())
+        self.assertFalse(window.cleanup_model_combo.isEnabled())
+        window.save()
+        saved = controller.applied[-1]
+        self.assertFalse(saved.cleanup_enabled)
+        self.assertEqual(saved.cleanup_prompt, "")
+
+    def test_overlong_cleanup_prompt_is_not_saved(self):
+        _, controller, window = self.open_window(make_config(api_key="key"))
+        window.cleanup_prompt_text.setPlainText("x" * 8001)
+        window.save()
+        self.assertEqual(controller.applied, [])
+        self.assertIn("8000", self.errors[-1][2])
+
     def test_api_key_is_hidden_until_revealed(self):
         from PySide6.QtWidgets import QLineEdit
 

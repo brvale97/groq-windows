@@ -635,6 +635,8 @@ class TrayApp:
             self.bubble.show_notice("Transcriptie te kort")
         elif state == "no_speech":
             self.bubble.show_notice("Geen spraak gedetecteerd")
+        elif state == "cleanup_skipped":
+            self.bubble.show_notice("Niet opgeschoond")
         else:
             if state == "recording":
                 self.player.stop()  # Never mix playback into a dictation.

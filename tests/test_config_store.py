@@ -59,6 +59,7 @@ class ConfigStoreTests(unittest.TestCase):
             "custom_words": ["Groq"], "word_replacements": [["Grok", "Groq"]], "shortcut": "insert",
             "input_device": "wasapi:Microphone (Realtek(R) Audio)", "sample_rate": 16000, "channels": 1,
             "paste_after_transcription": True, "remove_final_period": False, "auto_paragraphs": True,
+            "cleanup_enabled": True, "cleanup_model": "openai/gpt-oss-120b", "cleanup_prompt": "",
             "autostart": True,
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -84,6 +85,10 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(config.word_replacements, ())
             self.assertFalse(config.remove_final_period)
             self.assertTrue(config.auto_paragraphs)
+            # AI cleanup is on for existing installs too, with the built-in prompt.
+            self.assertTrue(config.cleanup_enabled)
+            self.assertEqual(config.cleanup_model, "openai/gpt-oss-120b")
+            self.assertEqual(config.cleanup_prompt, "")
 
     def test_corrupt_settings_fall_back_to_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

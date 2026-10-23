@@ -15,6 +15,7 @@ A small dictation app for Windows:
 - Settings are managed from the system tray, including the Groq API key, microphone, customizable shortcut, and automatic startup.
 - You can add names and terms such as `Groq` and `Clinon` with the correct spelling to your personal dictionary.
 - Explicit word replacements can correct known variants such as `Grok` or `Grog` to `Groq` after transcription.
+- AI cleanup on Groq (GPT-OSS 120B) removes filler words and repetitions and fixes punctuation, with your own system prompt if you like (see AI cleanup).
 - The app checks GitHub Releases for updates and can update itself without deleting your API key or settings.
 - A small status icon appears centered at the bottom of the screen while the app is in use: recording, transcribing, and then ready for another 3 seconds.
 - While recording, a subtle waveform scrolls from right to left like a dictaphone: bar heights follow your microphone volume, rise quickly when you speak and fade out gently when you stop. During silence it settles into small dots; the timer keeps counting.
@@ -106,6 +107,38 @@ The final period is preserved by default. Enable **Punt aan het einde verwijdere
 `.env` remains available as a fallback and migration path, but is no longer required for normal use.
 
 Runtime and build dependencies are kept separately in `requirements.txt` and `requirements-build.txt`. The PowerShell scripts reinstall them only when the Python version or dependency files have changed.
+
+## AI cleanup (0.2.7)
+
+<!-- Source: Bram's request in T3, 2026-10-24 ("AI-opschoning ... het liefste dat model wat hier staat, als dat kan, met Groq ... dat je dus je eigen system prompt erin kan stoppen"), and the tests below. Scope: text after transcription. -->
+After Whisper, the transcript goes to a chat model on Groq that removes
+filler words ("eh", "uh"), stutters and repetitions, keeps only the corrected
+version after "nee wacht" or "ik bedoel", and fixes punctuation, in the spirit
+of Wispr Flow. It is on by default, also after updating, with
+`openai/gpt-oss-120b` and the same API key. Settings has an **AI-opschoning**
+page with the switch, the model (GPT-OSS 120B, GPT-OSS 20B or any Groq model
+ID) and the system prompt. The built-in prompt is shown there; edit it to use
+your own, or click **Standaardprompt herstellen**. Dictionary words are added
+to the prompt as spellings.
+
+The order is: Whisper, word replacements, AI cleanup, paragraphs, final
+period. The dictation is sent between `<transcript>` tags, so a dictated
+"ignore previous instructions" stays text. If the request fails, is rate
+limited, takes longer than about 10 seconds, or the reply is much longer than
+the dictation (an answer instead of a cleanup), the literal transcript is
+pasted and the bubble shows **Niet opgeschoond**. Recordings and retries from
+History use the same settings; the saved audio is never changed.
+
+Tested on 2026-10-24 with 47 dictations (17 of Bram's real transcripts plus 30
+hard cases in Dutch, English and mixed): GPT-OSS 120B kept the language of
+every sentence, left all dictated questions and instructions as text (also
+over three runs each), removed the repetitions and applied 5 of 6 spoken
+corrections every time. It missed "The meeting is at 3 PM. Nee wacht, het is
+om vier uur." and also drops a "Maar wacht," that corrects nothing. GPT-OSS
+20B was about as fast but missed a correction, dropped an English "really"
+and changed "transcribt" to "transcribeert". A cleanup took 0.1-0.6 s
+(median 0.3 s). Bench scripts and results: `dist-release/v0.2.7/bench/`
+(not in Git).
 
 ## Updates
 
