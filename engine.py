@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pyautogui
+# Importing pyautogui makes the process system DPI aware before Qt starts, which
+# is how the UI has always been scaled. Pasting lives in windows_paste now.
+import pyautogui  # noqa: F401
 import pyperclip
 import sounddevice as sd
 import truststore
@@ -43,6 +45,7 @@ from dictation_core import (
 from history import RecordingEntry, RecordingHistory
 from microphone_test import windows_audio_thread
 from speech_detection import NoSpeechDetected, prepare_speech_detection, response_is_silence, speech_upload
+from windows_paste import paste_clipboard
 
 try:
     import winsound
@@ -299,9 +302,6 @@ class DictationEngine:
 
         prepare_speech_detection()
         logging.info("Spraakdetectie klaar: Silero VAD, lokaal op CPU")
-
-        pyautogui.FAILSAFE = False
-        pyautogui.PAUSE = 0
 
     def _resolve_device(self, config: Config) -> None:
         """Never let a vanished microphone block startup; report it when recording."""
@@ -656,7 +656,7 @@ class DictationEngine:
 
             if session.paste_after_transcription:
                 try:
-                    pyautogui.hotkey("ctrl", "v")
+                    paste_clipboard()
                     self.notify("Geplakt in het actieve venster.")
                 except Exception as exc:
                     self.notify(f"Automatisch plakken mislukte, maar de tekst staat op je klembord: {exc}")

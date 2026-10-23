@@ -246,7 +246,7 @@ class RecordingRecoveryTests(unittest.TestCase):
             remove_final_period=False, client=self.engine.client,
         )
         self.clipboard = mock.patch.object(engine.pyperclip, "copy").start()
-        self.paste = mock.patch.object(engine.pyautogui, "hotkey").start()
+        self.paste = mock.patch.object(engine, "paste_clipboard").start()
         mock.patch.object(engine, "play_sound").start()
         self.addCleanup(mock.patch.stopall)
 
@@ -334,7 +334,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.assertEqual(entry.text, "Herkenning werkt.")
         self.assertEqual(self.history.entries[0].text, entry.text)
         self.clipboard.assert_called_once_with("Herkenning werkt. ")
-        self.paste.assert_called_once_with("ctrl", "v")
+        self.paste.assert_called_once_with()
 
     def test_silent_recording_and_retry_skip_groq_and_preserve_clipboard(self) -> None:
         self.engine.transcribe_and_output(self.session, [np.zeros((24_000, 1), dtype=np.int16)])
@@ -370,7 +370,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         response.segments = [{"no_speech_prob": 0.01, "avg_logprob": -0.2}]
         self.engine.transcribe_and_output(self.session, self.frames())
         self.clipboard.assert_called_once_with("Thank you ")
-        self.paste.assert_called_once_with("ctrl", "v")
+        self.paste.assert_called_once_with()
 
     def test_very_short_silence_also_shows_no_speech_notice(self) -> None:
         self.engine.transcribe_and_output(self.session, [np.zeros((8000, 1), dtype=np.int16)])

@@ -125,6 +125,20 @@ next update.
 
 The app pastes text using `Ctrl+V` instead of typing it character by character. This is faster and works better with Dutch characters, punctuation, and longer text. Because the transcript is copied to the clipboard first, you can always paste it manually if automatic pasting fails.
 
+<!-- Source: Bram's request in T3, 2026-10-23 ("probeer t maar te fixen hoe jij denkt dat het t beste is"). Scope: automatic pasting. -->
+Since **0.2.6** the app no longer presses `Ctrl+V` the instant the transcript
+reaches the clipboard. Some apps sometimes pasted nothing: clipboard tools
+(Windows clipboard history, cloud clipboard, clipboard managers) briefly lock
+the clipboard to read every new text, longer texts for longer, and a key of the
+shortcut that is still held turns `Ctrl+V` into another shortcut. The app now
+waits until the shortcut keys are released (at most 1.5 s; after that it
+releases them itself) and until the clipboard is free (at most 0.6 s), then
+sends `Ctrl+V` with scan codes and 25 ms between the key events, as Handy,
+OpenWhispr and VoiceInk do. This adds roughly 0.2 s. `app.log` records which
+program received the paste, so an app that still misses it can be identified.
+The text is still pasted in one go; none of these projects pastes in chunks by
+default.
+
 ## Interface and reliability (0.1.19)
 
 The settings window was rebuilt around five pages in a fixed sidebar: **Dicteren**
