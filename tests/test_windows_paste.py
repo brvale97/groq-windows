@@ -4,7 +4,9 @@ import os
 import unittest
 
 import windows_paste
-from windows_paste import VK_CONTROL, VK_LMENU, VK_LWIN, VK_MASK, VK_RCONTROL, VK_V, paste_clipboard
+from windows_paste import (
+    VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MASK, VK_RCONTROL, VK_RMENU, VK_V, mask_menu_release, paste_clipboard,
+)
 
 CHORD = [(VK_CONTROL, False), (VK_V, False), (VK_V, True), (VK_CONTROL, True)]
 
@@ -110,6 +112,26 @@ class PasteTimingTests(unittest.TestCase):
             report = paste_clipboard(keyboard, sleep=clock.sleep, clock=clock)
         self.assertEqual(keyboard.events, CHORD)
         self.assertEqual(report.target, "")
+
+
+class MenuMaskTests(unittest.TestCase):
+    """Alt+Z must not leave the active window with a lone Alt release."""
+
+    def mask(self, *held):
+        keyboard = FakeKeyboard(FakeClock(), modifiers=held, modifiers_until=1)
+        return keyboard, mask_menu_release(keyboard)
+
+    def test_taps_the_mask_key_while_alt_or_win_is_down(self):
+        for key in (VK_LMENU, VK_RMENU, VK_LWIN):
+            keyboard, masked = self.mask(key, VK_LSHIFT)
+            self.assertTrue(masked)
+            self.assertEqual(keyboard.events, [(VK_MASK, False), (VK_MASK, True)])
+
+    def test_sends_nothing_for_ctrl_or_shift_or_released_keys(self):
+        for held in ((), (VK_RCONTROL,), (VK_LSHIFT,)):
+            keyboard, masked = self.mask(*held)
+            self.assertFalse(masked)
+            self.assertEqual(keyboard.events, [])
 
 
 @unittest.skipUnless(os.name == "nt", "Win32 structure layout")

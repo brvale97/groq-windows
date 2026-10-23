@@ -14,6 +14,16 @@ reached the clipboard. Some apps then pasted nothing:
 So, like Handy, OpenWhispr and VoiceInk: wait until the modifiers are up and
 the clipboard is free, then send Ctrl+V through SendInput with scan codes and
 short pauses between the key events.
+
+The shortcut itself can also move the keyboard focus. RegisterHotKey swallows
+the Z of Alt+Z but lets Alt through, so when Alt goes up after Z the active
+window sees a lone Alt. Electron apps with a menu bar, such as Signal, then
+put the focus on that (often hidden) menu bar; the next Alt press gives it
+back. So the stop press usually undid the start press, but after a click into
+a text field during the recording the stop press took the focus away from it
+and Ctrl+V went to the menu bar.
+mask_menu_release() taps an unassigned key while Alt is still down, so no
+press of the shortcut is a lone Alt (the AutoHotkey menu mask).
 """
 
 from __future__ import annotations
@@ -35,6 +45,8 @@ VK_MASK = 0xE8
 VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU = range(0xA0, 0xA6)
 VK_LWIN, VK_RWIN = 0x5B, 0x5C
 MODIFIER_KEYS = (VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN)
+# Released alone, these open the menu bar or the Start menu.
+MENU_KEYS = frozenset({VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN})
 EXTENDED_KEYS = frozenset({VK_RCONTROL, VK_RMENU, VK_LWIN, VK_RWIN})
 
 MODIFIER_RELEASE_TIMEOUT_SECONDS = 1.5
@@ -133,6 +145,20 @@ def paste_clipboard(
         f"; vastgehouden toetsen losgelaten: {', '.join(hex(key) for key in held)}" if held else "",
     )
     return report
+
+
+def mask_menu_release(api: KeyboardApi | None = None) -> bool:
+    """Tap VK_MASK while Alt or Win is down, so releasing it opens no menu.
+
+    Call it as soon as the shortcut fires: once Alt is up, the active window
+    has already seen a lone Alt.
+    """
+    api = api or WindowsKeyboard()
+    if MENU_KEYS.isdisjoint(api.held_modifiers()):
+        return False
+    api.send_key(VK_MASK, False)
+    api.send_key(VK_MASK, True)
+    return True
 
 
 def _wait(read, done, timeout, sleep, clock):

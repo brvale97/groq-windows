@@ -80,6 +80,39 @@ class ListenerTests(unittest.TestCase):
             self.assertTrue(seen.wait(2))
         self.assertNotEqual(threads[0], threading.current_thread().name)
 
+    def test_hotkey_masks_alt_before_the_callback_starts(self) -> None:
+        order: list[str] = []
+        started = threading.Event()
+
+        class Keyboard:
+            def held_modifiers(self):
+                return (0xA4,)  # left Alt
+
+            def send_key(self, vk, up):
+                order.append(f"{vk:#x} {'up' if up else 'down'}")
+
+        def callback() -> None:
+            order.append("callback")
+            started.set()
+
+        listener = HotkeyListener(callback)
+        listener._on_hotkey(Keyboard())
+        self.assertTrue(started.wait(2))
+        self.assertEqual(order, ["0xe8 down", "0xe8 up", "callback"])
+
+    def test_hotkey_still_fires_when_masking_fails(self) -> None:
+        started = threading.Event()
+
+        class BrokenKeyboard:
+            def held_modifiers(self):
+                raise OSError("no input desktop")
+
+        listener = HotkeyListener(started.set)
+        with self.assertLogs(level="ERROR"):
+            listener._on_hotkey(BrokenKeyboard())
+        self.assertTrue(started.wait(2))
+        listener._on_hotkey(None)
+
     @unittest.skipIf(os.name == "nt", "non-Windows fallback only")
     def test_non_windows_listener_validates_without_registering(self) -> None:
         listener = HotkeyListener(lambda: None)
