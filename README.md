@@ -172,6 +172,18 @@ program received the paste, so an app that still misses it can be identified.
 The text is still pasted in one go; none of these projects pastes in chunks by
 default.
 
+<!-- Source: Bram's report and observation in T3, 2026-10-24 ("als je tijdens recording in een tekstvak klikt dan plakt die daarna niet goed"). Scope: shortcuts with Alt or Windows. -->
+Since **0.2.7** the shortcut no longer moves the focus. Windows
+swallows the Z of `Alt+Z` but passes the Alt press and release on to the active
+window, so releasing Alt after Z looked like a lone Alt. Electron apps with a
+menu bar, such as Signal, then move the focus to that (often hidden) menu bar,
+and the next Alt press gives it back. Starting and stopping usually cancelled
+out, but after clicking into a text field during a recording, the stop press
+took the focus away from that field and `Ctrl+V` pasted nothing. The app now
+taps the unassigned key `0xE8` the moment the shortcut fires while Alt or
+Windows is still held, as AutoHotkey does, so the release is never a lone Alt
+or Windows key.
+
 ## Interface and reliability (0.1.19)
 
 The settings window was rebuilt around five pages in a fixed sidebar: **Dicteren**

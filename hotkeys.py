@@ -25,6 +25,8 @@ import os
 import threading
 from dataclasses import dataclass
 
+from windows_paste import WindowsKeyboard, mask_menu_release
+
 
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
@@ -435,6 +437,12 @@ class HotkeyListener:
         self._thread_id = kernel32.GetCurrentThreadId()
         self._ready.set()
 
+        try:
+            keyboard = WindowsKeyboard()
+        except Exception:
+            logging.exception("Shortcut keyboard access unavailable")
+            keyboard = None
+
         registered = False
         try:
             while True:
@@ -442,7 +450,7 @@ class HotkeyListener:
                 if result <= 0:
                     break
                 if message.message == WM_HOTKEY and int(message.wParam) == HOTKEY_ID:
-                    self._dispatch()
+                    self._on_hotkey(keyboard)
                 elif message.message == WM_APPLY_HOTKEY:
                     with self._pending_lock:
                         wanted = self._pending
@@ -481,6 +489,15 @@ class HotkeyListener:
                 user32.UnregisterHotKey(None, HOTKEY_ID)
             self.current = None
             self._applied.set()
+
+    def _on_hotkey(self, keyboard) -> None:
+        # Mask first, while Alt is most likely still down; see mask_menu_release().
+        if keyboard is not None:
+            try:
+                mask_menu_release(keyboard)
+            except Exception:
+                logging.exception("Could not mask the shortcut's Alt or Windows key")
+        self._dispatch()
 
     def _dispatch(self) -> None:
         # Never run user code on the message loop thread: a slow callback
