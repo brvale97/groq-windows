@@ -42,7 +42,7 @@ from dictation_core import (
 )
 from history import RecordingEntry, RecordingHistory
 from microphone_test import windows_audio_thread
-from speech_detection import NoSpeechDetected, contains_speech, prepare_speech_detection, response_is_silence
+from speech_detection import NoSpeechDetected, prepare_speech_detection, response_is_silence, speech_upload
 
 try:
     import winsound
@@ -609,8 +609,11 @@ class DictationEngine:
             else:
                 wav_path = self.recordings.audio_path(recording)
 
-            if not isinstance(session.client, QaClient) and not contains_speech(wav_path):
-                raise NoSpeechDetected()
+            upload = None
+            if not isinstance(session.client, QaClient):
+                upload = speech_upload(wav_path)
+                if upload is None:
+                    raise NoSpeechDetected()
 
             if new_recording and (duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES):
                 self.update_recording(recording, status="failed", error="Opname te kort. Je kunt opnieuw proberen.")
@@ -621,9 +624,11 @@ class DictationEngine:
                 return
 
             self.update_recording(recording, status="processing")
+            if isinstance(upload, tuple):
+                self.notify("Lange stilte aan het eind niet meegestuurd naar Groq.")
 
             text = apply_word_replacements(
-                self.transcribe(session, wav_path).strip(),
+                self.transcribe(session, wav_path, upload).strip(),
                 session.word_replacements,
             )
             if session.auto_paragraphs:
@@ -682,9 +687,18 @@ class DictationEngine:
             self.recording_changed()
             self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")
 
-    def transcribe(self, session: RecordingSession, wav_path: Path) -> str:
+    def transcribe(
+        self, session: RecordingSession, wav_path: Path, upload: tuple[str, bytes] | Path | None = None,
+    ) -> str:
+        """Transcribe the recording, or the in-memory copy without its trailing silence."""
+        if isinstance(upload, tuple):
+            return self._request_transcription(session, upload)
+        with wav_path.open("rb") as audio_file:
+            return self._request_transcription(session, audio_file)
+
+    def _request_transcription(self, session: RecordingSession, audio_file) -> str:
         kwargs = {
-            "file": wav_path.open("rb"),
+            "file": audio_file,
             "model": session.model,
             "response_format": "verbose_json",
             "temperature": 0.0,
@@ -694,18 +708,16 @@ class DictationEngine:
         if session.prompt:
             kwargs["prompt"] = session.prompt
 
-        with kwargs["file"] as audio_file:
-            kwargs["file"] = audio_file
-            try:
-                transcription = session.client.audio.transcriptions.create(**kwargs)
-            except Exception as exc:
-                error_text = str(exc).lower()
-                if "prompt" in error_text and ("224" in error_text or "token" in error_text):
-                    raise RuntimeError(
-                        "Prompt en woordenboek zijn samen te lang voor Groq. "
-                        "Maak de Prompt korter of verwijder enkele woorden."
-                    ) from exc
-                raise
+        try:
+            transcription = session.client.audio.transcriptions.create(**kwargs)
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "prompt" in error_text and ("224" in error_text or "token" in error_text):
+                raise RuntimeError(
+                    "Prompt en woordenboek zijn samen te lang voor Groq. "
+                    "Maak de Prompt korter of verwijder enkele woorden."
+                ) from exc
+            raise
 
         if response_is_silence(getattr(transcription, "segments", None)):
             raise NoSpeechDetected()

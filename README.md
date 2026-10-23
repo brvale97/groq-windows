@@ -77,6 +77,18 @@ check. These checks reduce empty-audio hallucinations; speech detection is not
 perfect. No transcript phrases are blacklisted, so spoken "Thank you" remains
 valid. Rejected audio stays in History and the app shows **Geen spraak gedetecteerd**.
 
+<!-- Source: Bram's request in T3, 2026-10-23, and the tests below. Scope: dictation and recording retries. -->
+In **0.2.6**, a silence of 2 seconds or longer after the last word is not sent
+to Groq; 0.4 seconds after the last word is kept. Whisper tends to invent a
+closing line for such a silence: in a test with 60 recordings built from Bram's
+own dictations, a single request with 8 seconds of trailing silence ended with
+a made-up "Dank u wel." twice, the trimmed upload never. Pauses inside the
+dictation and silence before it are not cut. Splitting the upload at every
+pause of 2 seconds or longer was tested and rejected: Whisper broke sentences
+at the cuts and misdetected the language of short pieces ("Hello?" for
+"Hallo?"), raising word errors from 1.3% to 2.2%. The saved recording is never
+altered, and retries from History apply the same rule.
+
 Settings are stored in `%APPDATA%\GroqInsertDictation\settings.json`. The API key is stored in Windows Credential Manager whenever possible.
 
 Open the personal dictionary from Settings to add names, jargon, and terms that are often transcribed with the wrong spelling. The app sends these terms as spelling context in the same Groq transcription request. Because Whisper treats that context as a hint rather than a guarantee, add known mistakes such as `Grok → Groq` or `Grog → Groq` in the **Replacements** section directly below the dictionary. Replacements are applied locally after transcription and before the text is copied or pasted. The existing free-form **Prompt** field continues to work alongside the dictionary.

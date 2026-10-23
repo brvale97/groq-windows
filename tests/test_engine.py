@@ -1,5 +1,6 @@
 """The dictation engine without microphone, network or desktop; runs on any OS."""
 import dataclasses
+import io
 import math
 import queue
 import tempfile
@@ -405,6 +406,53 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.engine.transcribe_and_output(session, self.frames())
         self.assertEqual(self.engine.recordings.entries[0].text, response)
         self.clipboard.assert_called_once_with(response + " ")
+
+    def test_long_trailing_silence_is_not_sent_but_kept_in_history(self) -> None:
+        sent = []
+
+        def request(**kwargs):
+            name, data = kwargs["file"]
+            with wave.open(io.BytesIO(data), "rb") as wav:
+                sent.append((name, wav.readframes(wav.getnframes())))
+            return mock.Mock(text="Klaar met praten.", segments=None)
+
+        self.engine.client.audio.transcriptions.create.side_effect = request
+        frames = [np.concatenate((self.frames()[0], np.zeros((16_000 * 8, 1), dtype=np.int16)))]
+        recorded = np.concatenate(frames).tobytes()
+        self.engine.transcribe_and_output(self.session, frames)
+        entry = self.engine.recordings.entries[0]
+        self.assertEqual(entry.text, "Klaar met praten.")
+        self.clipboard.assert_called_once_with("Klaar met praten. ")
+        self.assertEqual(len(sent), 1)
+        name, audio = sent[0]
+        self.assertEqual(name, self.engine.recordings.audio_path(entry).name)
+        self.assertTrue(recorded.startswith(audio))
+        self.assertLess(len(audio), len(recorded) - 16_000 * 2 * 7)
+        with wave.open(str(self.engine.recordings.audio_path(entry)), "rb") as wav:
+            self.assertEqual(wav.readframes(wav.getnframes()), recorded)
+        messages = [str(call.args[0]) for call in self.engine.status_callback.call_args_list]
+        self.assertTrue(any("stilte aan het eind" in message for message in messages))
+
+    def test_pause_inside_the_dictation_still_sends_the_whole_recording(self) -> None:
+        speech = self.frames(duration=1.0)[0]
+        frames = [np.concatenate((speech, np.zeros((16_000 * 6, 1), dtype=np.int16), speech))]
+        self.engine.client.audio.transcriptions.create.return_value.text = "Een. Twee."
+        self.engine.transcribe_and_output(self.session, frames)
+        kwargs = self.engine.client.audio.transcriptions.create.call_args.kwargs
+        entry = self.engine.recordings.entries[0]
+        self.assertEqual(Path(kwargs["file"].name), self.engine.recordings.audio_path(entry))
+        self.assertEqual(self.engine.client.audio.transcriptions.create.call_count, 1)
+
+    def test_retry_trims_the_trailing_silence_again(self) -> None:
+        frames = [np.concatenate((self.frames()[0], np.zeros((16_000 * 5, 1), dtype=np.int16)))]
+        self.engine.client.audio.transcriptions.create.side_effect = RuntimeError("Network unavailable")
+        self.engine.transcribe_and_output(self.session, frames)
+        entry = self.engine.recordings.entries[0]
+        self.engine.client.audio.transcriptions.create.side_effect = None
+        self.engine.client.audio.transcriptions.create.return_value.text = "Opnieuw."
+        self.run_retry_synchronously(entry.id)
+        self.assertEqual(self.engine.recordings.get(entry.id).text, "Opnieuw.")
+        self.assertIsInstance(self.engine.client.audio.transcriptions.create.call_args.kwargs["file"], tuple)
 
     def test_empty_and_star_only_responses_leave_retryable_audio(self) -> None:
         for response in ("", "   ", "***"):
