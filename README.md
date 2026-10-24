@@ -140,7 +140,7 @@ and changed "transcribt" to "transcribeert". A cleanup took 0.1-0.6 s
 (median 0.3 s). Bench scripts and results: `dist-release/v0.2.7/bench/`
 (not in Git).
 
-## Microphone priority (0.2.7.4 test)
+## Microphone priority (0.2.8)
 
 <!-- Source: Bram's request in T3, 2026-10-24 (priority 1, 2, 3; switch automatically and show it; show clearly when there is no microphone), his approval of the mockup ("Ja, bouw maar in, dat is perfect"), and the tests below. Scope: microphone choice and the status bubble. -->
 A friend had chosen a Bluetooth headset that was not connected; Alt+Z then
@@ -161,7 +161,7 @@ entry.
 
 **Microfoon testen** tests the microphone the next recording would use. It
 records until you click **Stop test** (at most 10 seconds) and keeps what you
-said for **Terugluisteren**; before 0.2.7.2 it always took 5 seconds.
+said for **Terugluisteren**; before 0.2.8 it always took 5 seconds.
 
 The app reads the Windows audio devices again at every shortcut press
 (re-initializing PortAudio took about 40 ms on AMD), so a headset that connected
