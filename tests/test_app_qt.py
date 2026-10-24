@@ -199,19 +199,94 @@ class StatusBubbleTests(unittest.TestCase):
         QTest.mouseClick(self.bubble, Qt.MouseButton.LeftButton)
         self.assertEqual(self.clicks, [True])
 
+    def fallback(self, priority=2, name="Microfoon (Rode NT-USB Mini)",
+                 skipped=("Headset Microphone (Soundcore Motion Boom)",), missing=True):
+        return app.InputChoice(None, name, priority, False, skipped, missing)
+
+    def test_switching_microphones_shows_a_card_and_keeps_a_badge(self):
+        from PySide6.QtTest import QTest
+
+        self.bubble.set_state("recording")
+        plain = self.bubble.size()
+        self.bubble.set_state("idle")
+        self.bubble.set_input(self.fallback())
+        self.bubble.set_state("recording")
+        self.assertTrue(self.bubble.input_notice_visible)
+        self.assertEqual(self.bubble.input_notice_texts(),
+                         ("Overgeschakeld naar Rode NT-USB Mini", "Soundcore Motion Boom niet verbonden"))
+        self.assertTrue(self.bubble.input_notice_timer.isActive())
+        self.assertEqual(self.bubble.input_notice_timer.interval(), app.INPUT_NOTICE_MS)
+        self.assertGreater(self.bubble.height(), plain.height() + 40)
+        pill = self.bubble._pill_rect()
+        self.assertEqual(pill.bottom(), self.bubble.height() - app.BUBBLE_MARGIN)
+        self.assertEqual(self.bubble.pill_size.width(), plain.width() - 2 * app.BUBBLE_MARGIN + app.RECORDING_BADGE_WIDTH)
+        self.bubble.grab()
+        # The card only informs; the pill below still stops the recording.
+        QTest.mouseClick(self.bubble, Qt.MouseButton.LeftButton, pos=self.bubble._input_notice_rect().center().toPoint())
+        self.assertEqual(self.clicks, [])
+        QTest.mouseClick(self.bubble, Qt.MouseButton.LeftButton, pos=pill.center().toPoint())
+        self.assertEqual(self.clicks, [True])
+        self.bubble.input_notice_timer.timeout.emit()
+        self.assertFalse(self.bubble.input_notice_visible)
+        self.assertEqual(self.bubble.height(), plain.height())
+        self.assertIsNotNone(self.bubble.input_choice)  # The badge stays for the whole recording.
+        self.bubble.grab()
+        self.bubble.set_state("processing")
+        self.assertIsNone(self.bubble.input_choice)
+        self.assertEqual(self.bubble.badge_width(), 0)
+
+    def test_the_first_priority_needs_no_card(self):
+        self.bubble.set_input(app.InputChoice(3, "Microfoon (Rode NT-USB Mini)", 1, True))
+        self.bubble.set_state("recording")
+        self.assertFalse(self.bubble.input_notice_visible)
+        self.assertIsNone(self.bubble.input_choice)
+        self.assertEqual(self.bubble.height(), 48 + 2 * app.BUBBLE_MARGIN)
+
+    def test_card_texts_for_the_windows_default_and_several_missing_microphones(self):
+        self.bubble.set_input(self.fallback(0, "Microfoonmatrix (Realtek(R) Audio)", (
+            "Headset Microphone (Soundcore Motion Boom)", "Microfoon (Rode NT-USB Mini)",
+        )))
+        self.assertEqual(self.bubble.input_notice_texts(), (
+            "Overgeschakeld naar Realtek(R) Audio",
+            "Soundcore Motion Boom en Rode NT-USB Mini niet verbonden · Windows-standaard",
+        ))
+        self.bubble.set_input(self.fallback(0, "", ("Headset Microphone (Soundcore Motion Boom)",)))
+        self.assertEqual(self.bubble.input_notice_texts(),
+                         ("Overgeschakeld naar Windows-standaard", "Soundcore Motion Boom niet verbonden"))
+        self.bubble.set_input(self.fallback(4, skipped=("A", "B", "C"), missing=False))
+        self.assertEqual(self.bubble.input_notice_texts()[1], "3 microfoons niet beschikbaar")
+        self.bubble.set_state("recording")
+        self.bubble.grab()
+
+    def test_a_long_device_name_keeps_the_card_bounded(self):
+        self.bubble.set_input(self.fallback(name="Microfoon (" + "Heel lange naam " * 12 + ")"))
+        self.bubble.set_state("recording")
+        self.assertLessEqual(self.bubble.input_notice_size().width(), app.INPUT_NOTICE_MAX_WIDTH)
+        self.bubble.grab()
+
+    def test_notice_with_a_second_line_stays_longer(self):
+        self.bubble.show_notice("Geen microfoon gevonden", "Verbind je headset of sluit een microfoon aan.",
+                                glyph="mic-off", visible_ms=app.NO_MICROPHONE_VISIBLE_MS, opens_microphone_settings=True)
+        self.assertEqual(self.bubble.hide_timer.interval(), app.NO_MICROPHONE_VISIBLE_MS)
+        self.assertGreater(self.bubble.pill_size.height(), 48)
+        self.assertTrue(self.bubble.opens_microphone_settings)
+        self.bubble.grab()
+        self.bubble.set_state("recording")
+        self.assertFalse(self.bubble.opens_microphone_settings)
+
 
 class TrayBehaviourTests(unittest.TestCase):
     def tray_with_engine(self, state="idle"):
         tray = bare_tray()
         tray.engine = types.SimpleNamespace(
             state=state, lock=threading.Lock(), stream_transition_lock=threading.Lock(),
-            _resolve_device=mock.Mock(), on_shortcut=mock.Mock(),
+            on_shortcut=mock.Mock(),
         )
         tray.config = Config()
         tray.player = mock.Mock()
         tray.player.status.return_value = PlaybackStatus()
         tray.settings_window = None
-        tray.bubble = mock.Mock()
+        tray.bubble = mock.Mock(opens_microphone_settings=False)
         tray.open_settings = mock.Mock()
         return tray
 
@@ -226,6 +301,21 @@ class TrayBehaviourTests(unittest.TestCase):
         tray.engine.state = "idle"
         tray.on_bubble_click()
         tray.open_settings.assert_called_once_with()
+        tray.bubble.opens_microphone_settings = True  # The "no microphone" notice.
+        tray.on_bubble_click()
+        tray.open_settings.assert_called_with("dictate")
+
+    def test_missing_microphones_show_a_notice_that_leads_to_settings(self):
+        tray = self.tray_with_engine()
+        tray.set_engine_state("no_microphone")
+        args, kwargs = tray.bubble.show_notice.call_args
+        self.assertEqual(args[0], "Geen microfoon gevonden")
+        self.assertIn("Verbind je headset", args[1])
+        self.assertEqual(kwargs["visible_ms"], app.NO_MICROPHONE_VISIBLE_MS)
+        self.assertTrue(kwargs["opens_microphone_settings"])
+        tray.set_engine_state("microphone_unavailable")
+        self.assertEqual(tray.bubble.show_notice.call_args.args[0], "Microfoon kon niet worden geopend")
+        tray.bubble.set_state.assert_not_called()
 
     def test_dictation_start_stops_playback_and_short_audio_shows_a_notice(self):
         tray = self.tray_with_engine()

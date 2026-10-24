@@ -118,6 +118,45 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(created[0].closed)
         self.assertIsNone(dictation.stream)
 
+    def test_recording_reports_its_microphone_before_it_starts(self) -> None:
+        events = []
+        dictation = engine.DictationEngine(
+            Config(api_key="test", input_devices=("wasapi:A", "wasapi:B")),
+            state_callback=lambda state: events.append(state),
+            input_callback=lambda choice: events.append(choice),
+        )
+        choice = engine.InputChoice(4, "B", 2, True, ("A",))
+        stream = mock.Mock()
+        with (
+            mock.patch.object(dictation, "_open_input", return_value=(stream, choice)) as open_input,
+            mock.patch.object(engine, "play_sound") as play_sound,
+        ):
+            dictation.start_recording()
+        open_input.assert_called_once()
+        self.assertEqual(open_input.call_args.args[0], ("wasapi:A", "wasapi:B"))
+        self.assertEqual(events, [choice, "recording"])
+        self.assertIs(dictation.stream, stream)
+        self.assertEqual((dictation.active_session.input_device, dictation.active_session.wasapi), (4, True))
+        play_sound.assert_called_once_with("start.wav")
+
+    def test_no_microphone_returns_to_idle_with_a_visible_state(self) -> None:
+        events, messages = [], []
+        dictation = engine.DictationEngine(
+            Config(api_key="test"), status_callback=messages.append, state_callback=events.append,
+        )
+        for found, state in ((False, "no_microphone"), (True, "microphone_unavailable")):
+            events.clear()
+            with (
+                mock.patch.object(dictation, "_open_input", side_effect=engine.NoMicrophoneError(found=found)),
+                mock.patch.object(engine, "play_sound") as play_sound,
+            ):
+                dictation.start_recording()
+            self.assertEqual(events, [state])
+            self.assertEqual(dictation.state, "idle")
+            self.assertIsNone(dictation.active_session)
+            play_sound.assert_called_once_with("error.wav")
+        self.assertIn("Geen microfoon gevonden", messages[0])
+
     def test_transcription_sends_one_combined_prompt(self) -> None:
         client = mock.Mock()
         client.audio.transcriptions.create.return_value.text = "Groq en Clinon"

@@ -18,6 +18,29 @@ MAX_REPLACEMENT_PART_LENGTH = 80
 DEFAULT_DEVICE_LABEL = "Windows-standaard"
 
 
+def short_device_name(name: str) -> str:
+    """The recognisable part of a Windows endpoint name, for the status bubble.
+
+    "Headset Microphone (Soundcore Motion Boom)" becomes "Soundcore Motion Boom";
+    names without a part in parentheses stay as they are.
+    """
+    name = name.removeprefix("wasapi:")
+    start = name.find(" (")
+    if start > 0 and name.endswith(")") and len(name) - start > 3:
+        return name[start + 2:-1]
+    return name
+
+
+def unavailable_microphones_text(names: Sequence[str], *, connected: bool = True) -> str:
+    """"Soundcore niet verbonden", "A en B niet verbonden", "3 microfoons niet verbonden"."""
+    state = "niet verbonden" if connected else "niet beschikbaar"
+    if len(names) == 1:
+        return f"{names[0]} {state}"
+    if len(names) == 2:
+        return f"{names[0]} en {names[1]} {state}"
+    return f"{len(names)} microfoons {state}"
+
+
 class DictionaryValidationError(ValueError):
     """Raised when a custom dictionary entry cannot safely be used."""
 

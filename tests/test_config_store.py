@@ -40,11 +40,14 @@ class ConfigStoreTests(unittest.TestCase):
                 sample_rate=48_000,
                 channels=2,
                 remove_final_period=True,
-                input_device="wasapi:Microphone (Realtek(R) Audio)",
+                input_devices=("wasapi:Headset Microphone (Soundcore Motion Boom)", "wasapi:Microphone (Realtek(R) Audio)"),
             )
             config_store.save_config(config)
             stored = json.loads(settings_path.read_text(encoding="utf-8"))
             loaded = config_store.load_config()
+            self.assertEqual(stored["input_devices"], list(config.input_devices))
+            # Older versions (after a rollback) read one microphone: the first priority.
+            self.assertEqual(stored["input_device"], "wasapi:Headset Microphone (Soundcore Motion Boom)")
             self.assertEqual(stored["custom_words"], ["Groq", "Clinon"])
             self.assertEqual(stored["word_replacements"], [["Grok", "Groq"], ["Grog", "Groq"]])
             self.assertEqual(stored["sample_rate"], 48_000)
@@ -53,27 +56,67 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertNotIn("api_key", stored)
             self.assertEqual(loaded, config)
 
-    def test_settings_written_by_0_1_27_load_unchanged(self) -> None:
-        legacy = {
-            "model": "whisper-large-v3", "language": "nl", "prompt": "Overleg",
-            "custom_words": ["Groq"], "word_replacements": [["Grok", "Groq"]], "shortcut": "insert",
-            "input_device": "wasapi:Microphone (Realtek(R) Audio)", "sample_rate": 16000, "channels": 1,
-            "paste_after_transcription": True, "remove_final_period": False, "auto_paragraphs": True,
-            "cleanup_enabled": True, "cleanup_model": "openai/gpt-oss-120b", "cleanup_prompt": "",
-            "autostart": True,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            settings_path = self.patched(
-                directory, try_read_api_key_from_keyring=mock.Mock(return_value=(True, "secret")),
-            )
-            text = json.dumps(legacy, indent=2, ensure_ascii=False) + "\n"
-            settings_path.write_text(text, encoding="utf-8")
-            loaded = config_store.load_config()
-            self.assertEqual(loaded.shortcut, "insert")
-            self.assertEqual(loaded.input_device, legacy["input_device"])
-            config_store.save_config(loaded)
-            # Startup re-saves settings; an unchanged file must stay byte-identical.
-            self.assertEqual(settings_path.read_text(encoding="utf-8"), text)
+    LEGACY_0_2_7 = {
+        "model": "whisper-large-v3", "language": "nl", "prompt": "Overleg",
+        "custom_words": ["Groq"], "word_replacements": [["Grok", "Groq"]], "shortcut": "insert",
+        "input_device": "wasapi:Microphone (Realtek(R) Audio)", "sample_rate": 16000, "channels": 1,
+        "paste_after_transcription": True, "remove_final_period": False, "auto_paragraphs": True,
+        "cleanup_enabled": True, "cleanup_model": "openai/gpt-oss-120b", "cleanup_prompt": "",
+        "autostart": True,
+    }
+
+    def load_settings(self, data: dict) -> tuple[Path, str, "config_store.Config"]:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        settings_path = self.patched(
+            directory.name, try_read_api_key_from_keyring=mock.Mock(return_value=(True, "secret")),
+        )
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        settings_path.write_text(text, encoding="utf-8")
+        return settings_path, text, config_store.load_config()
+
+    def test_unchanged_settings_stay_byte_identical(self) -> None:
+        current = {}
+        for key, value in self.LEGACY_0_2_7.items():
+            current[key] = value
+            if key == "input_device":
+                current["input_devices"] = [value, "wasapi:Headset Microphone (Soundcore Motion Boom)"]
+        settings_path, text, loaded = self.load_settings(current)
+        self.assertEqual(loaded.shortcut, "insert")
+        self.assertEqual(loaded.input_devices, tuple(current["input_devices"]))
+        config_store.save_config(loaded)
+        # Startup re-saves settings; an unchanged file must stay byte-identical.
+        self.assertEqual(settings_path.read_text(encoding="utf-8"), text)
+
+    def test_the_single_microphone_of_0_2_7_becomes_priority_one(self) -> None:
+        settings_path, _text, loaded = self.load_settings(self.LEGACY_0_2_7)
+        self.assertEqual(loaded.input_devices, ("wasapi:Microphone (Realtek(R) Audio)",))
+        config_store.save_config(loaded)
+        stored = json.loads(settings_path.read_text(encoding="utf-8"))
+        # Every existing setting keeps its value; only the list is added.
+        self.assertEqual({k: v for k, v in stored.items() if k != "input_devices"}, self.LEGACY_0_2_7)
+        self.assertEqual(stored["input_devices"], ["wasapi:Microphone (Realtek(R) Audio)"])
+        keys = list(stored)
+        self.assertEqual(keys.index("input_devices"), keys.index("input_device") + 1)
+
+    def test_windows_default_of_0_2_7_becomes_an_empty_list(self) -> None:
+        _path, _text, loaded = self.load_settings({**self.LEGACY_0_2_7, "input_device": ""})
+        self.assertEqual(loaded.input_devices, ())
+
+    def test_a_microphone_chosen_in_an_older_version_moves_to_the_top(self) -> None:
+        # After a rollback 0.2.7 only rewrites "input_device".
+        _path, _text, loaded = self.load_settings({
+            "input_device": "wasapi:B", "input_devices": ["wasapi:A", "wasapi:B", "wasapi:C"],
+        })
+        self.assertEqual(loaded.input_devices, ("wasapi:B", "wasapi:A", "wasapi:C"))
+        _path, _text, loaded = self.load_settings({"input_device": "wasapi:D", "input_devices": ["wasapi:A"]})
+        self.assertEqual(loaded.input_devices, ("wasapi:D", "wasapi:A"))
+
+    def test_invalid_priority_entries_are_dropped(self) -> None:
+        _path, _text, loaded = self.load_settings({
+            "input_device": "wasapi:A", "input_devices": ["wasapi:A", "", 3, None, "wasapi:A", "wasapi:B"],
+        })
+        self.assertEqual(loaded.input_devices, ("wasapi:A", "wasapi:B"))
 
     def test_legacy_settings_load_with_an_empty_dictionary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

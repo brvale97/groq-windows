@@ -16,6 +16,23 @@ from dictation_core import (
 )
 
 
+class MicrophoneNameTests(unittest.TestCase):
+    def test_bubble_uses_the_recognisable_part_of_a_windows_name(self) -> None:
+        from dictation_core import short_device_name
+
+        self.assertEqual(short_device_name("Headset Microphone (Soundcore Motion Boom)"), "Soundcore Motion Boom")
+        self.assertEqual(short_device_name("wasapi:Microfoonmatrix (Realtek(R) Audio)"), "Realtek(R) Audio")
+        self.assertEqual(short_device_name("Yeti"), "Yeti")
+        self.assertEqual(short_device_name("Microfoon ()"), "Microfoon ()")
+
+    def test_unavailable_microphones_are_summarised(self) -> None:
+        from dictation_core import unavailable_microphones_text
+
+        self.assertEqual(unavailable_microphones_text(["Soundcore"]), "Soundcore niet verbonden")
+        self.assertEqual(unavailable_microphones_text(["A", "B"]), "A en B niet verbonden")
+        self.assertEqual(unavailable_microphones_text(["A", "B", "C"], connected=False), "3 microfoons niet beschikbaar")
+
+
 class FinalPeriodPreferenceTests(unittest.TestCase):
     def test_keeps_final_period_when_setting_is_disabled(self) -> None:
         self.assertEqual(

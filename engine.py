@@ -6,6 +6,7 @@ turns into signals so worker threads never touch widgets.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import os
@@ -170,22 +171,25 @@ def resolve_input_device(input_device: str) -> int | None:
     raise RuntimeError(f"Geen input device gevonden voor {input_device!r}.")
 
 
-def input_devices() -> list[tuple[str, str]]:
-    available = sd.query_devices()
-    default_name = None
+def default_input_name() -> str | None:
+    """Name of the Windows default microphone, or None if there is none."""
     try:
+        available = sd.query_devices()
         # MME's "Microsoft Sound Mapper" is an alias. WASAPI exposes the
         # actual Windows default endpoint and its complete friendly name.
         for host_api in sd.query_hostapis():
             if host_api["name"] == "Windows WASAPI":
                 index = host_api["default_input_device"]
-                if index >= 0:
-                    default_name = available[index]["name"]
-                break
-        else:
-            default_name = sd.query_devices(kind="input")["name"]
+                return available[index]["name"] if index >= 0 else None
+        return sd.query_devices(kind="input")["name"]
     except Exception as exc:
         logging.warning("Could not identify default input device: %s", exc)
+        return None
+
+
+def input_devices() -> list[tuple[str, str]]:
+    available = sd.query_devices()
+    default_name = default_input_name()
     default_label = (
         f"{DEFAULT_DEVICE_LABEL}: {default_name}"
         if default_name else f"{DEFAULT_DEVICE_LABEL} (geen microfoon beschikbaar)"
@@ -260,6 +264,34 @@ def make_client(api_key: str):
 
 
 @dataclass(frozen=True)
+class InputChoice:
+    """The microphone a recording uses and the preferred ones it had to skip."""
+
+    device: int | None
+    name: str
+    # Place in the priority list; 0 is the Windows default after the list.
+    priority: int
+    wasapi: bool = False
+    skipped: tuple[str, ...] = ()
+    # True when every skipped microphone was missing, False when one was
+    # present but could not be opened.
+    skipped_missing: bool = True
+
+    @property
+    def fallback(self) -> bool:
+        return bool(self.skipped)
+
+
+class NoMicrophoneError(RuntimeError):
+    def __init__(self, *, found: bool) -> None:
+        self.found = found
+        super().__init__(
+            "Geen microfoon kon worden geopend. Kies een andere microfoon in Instellingen." if found
+            else "Geen microfoon gevonden. Verbind je headset of sluit een microfoon aan."
+        )
+
+
+@dataclass(frozen=True)
 class RecordingSession:
     input_device: int | None
     sample_rate: int
@@ -292,6 +324,7 @@ class DictationEngine:
     def __init__(
         self, config: Config, status_callback=None, state_callback=None, transcript_callback=None,
         recording_history: RecordingHistory | None = None, recording_callback=None,
+        input_callback=None, refresh_inputs=None,
     ) -> None:
         self.config = config
         self.status_callback = status_callback or (lambda message: None)
@@ -299,9 +332,10 @@ class DictationEngine:
         self.transcript_callback = transcript_callback or (lambda text: None)
         self.recordings = recording_history if recording_history is not None else RecordingHistory(config_store.RECORDINGS_DIR)
         self.recording_callback = recording_callback or (lambda: None)
-        self.input_device: int | None = None
-        self.input_device_error: str | None = None
-        self._resolve_device(config)
+        # Receives the InputChoice of every recording just before "recording".
+        self.input_callback = input_callback or (lambda choice: None)
+        # Re-reads the Windows audio devices; the app resets PortAudio here.
+        self.refresh_inputs = refresh_inputs or (lambda: None)
         self.client = make_client(config.api_key)
         self.audio_queue: queue.SimpleQueue = queue.SimpleQueue()
         self.audio_warning: str | None = None
@@ -316,20 +350,9 @@ class DictationEngine:
         prepare_speech_detection()
         logging.info("Spraakdetectie klaar: Silero VAD, lokaal op CPU")
 
-    def _resolve_device(self, config: Config) -> None:
-        """Never let a vanished microphone block startup; report it when recording."""
-        try:
-            self.input_device = resolve_input_device(config.input_device)
-            self.input_device_error = None
-        except Exception as exc:
-            self.input_device = None
-            self.input_device_error = str(exc)
-            logging.warning("Could not resolve input device: %s", exc)
-
     def update_config(self, config: Config) -> None:
         with self.lock:
             self.config = config
-            self._resolve_device(config)
             self.client = make_client(config.api_key)
 
     def notify(self, message: str) -> None:
@@ -377,15 +400,11 @@ class DictationEngine:
             if self.state != "idle":
                 return
             config = self.config
-            if self.input_device_error:
-                self.notify(f"{self.input_device_error} Kies een andere microfoon in Instellingen.")
-                play_sound("error.wav")
-                return
             if self.client is None or (not config.api_key and not isinstance(self.client, QaClient)):
                 session = None
             else:
                 session = RecordingSession(
-                    input_device=self.input_device,
+                    input_device=None,
                     sample_rate=config.sample_rate,
                     channels=config.channels,
                     model=config.model,
@@ -396,7 +415,6 @@ class DictationEngine:
                     remove_final_period=config.remove_final_period,
                     client=self.client,
                     auto_paragraphs=config.auto_paragraphs,
-                    wasapi=config.input_device.startswith("wasapi:"),
                     **cleanup_session_settings(config),
                 )
 
@@ -411,34 +429,98 @@ class DictationEngine:
             self.audio_level_reading = (0.0, 0.0)
             self.audio_level_peak = 0.0
 
-        stream: sd.InputStream | None = None
         try:
-            stream = sd.InputStream(
-                device=session.input_device,
-                samplerate=session.sample_rate,
-                channels=session.channels,
-                dtype="int16",
-                callback=self.audio_callback,
-                **({"extra_settings": sd.WasapiSettings(auto_convert=True)} if session.wasapi else {}),
-            )
-            stream.start()
-            self.stream = stream
-        except Exception:
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    logging.exception("Could not close failed input stream")
+            stream, choice = self._open_input(config.input_devices, session)
+        except Exception as exc:
             with self.lock:
                 self.state = "idle"
                 self.active_session = None
                 self.stream = None
-            self.emit_state("idle")
-            raise
+            if not isinstance(exc, NoMicrophoneError):
+                self.emit_state("idle")
+                raise
+            self.emit_state("microphone_unavailable" if exc.found else "no_microphone")
+            play_sound("error.wav")
+            self.notify(str(exc))
+            return
+        with self.lock:
+            self.stream = stream
+            self.active_session = dataclasses.replace(session, input_device=choice.device, wasapi=choice.wasapi)
 
+        self.input_callback(choice)
         self.emit_state("recording")
         play_sound("start.wav")
         self.notify("Opname gestart. Gebruik je shortcut opnieuw om te stoppen.")
+
+    def _open_input(self, selectors: tuple[str, ...], session: RecordingSession) -> tuple[sd.InputStream, InputChoice]:
+        """Open the first microphone of the priority list that works, else the Windows default.
+
+        PortAudio lists devices only when it initializes, so the list is read
+        again first: a headset that connected or disconnected since the last
+        recording counts. Raises NoMicrophoneError if nothing can be opened.
+        """
+        try:
+            self.refresh_inputs()
+        except Exception:
+            logging.exception("Could not refresh the microphone list")
+        skipped: list[str] = []
+        skipped_missing = True
+        for priority, selector in enumerate(selectors, start=1):
+            name = selector.removeprefix("wasapi:")
+            try:
+                device = resolve_input_device(selector)
+            except Exception as exc:
+                logging.info("Microfoon %d overgeslagen: %s", priority, exc)
+                skipped.append(name)
+                continue
+            wasapi = selector.startswith("wasapi:")
+            try:
+                stream = self._open_stream(session, device, wasapi=wasapi)
+            except Exception as exc:
+                logging.warning("Microfoon %d (%s) kon niet worden geopend: %s", priority, name, exc)
+                skipped.append(name)
+                skipped_missing = False
+                continue
+            if not wasapi:
+                try:
+                    name = sd.query_devices(device)["name"]
+                except Exception:
+                    pass
+            choice = InputChoice(device, name, priority, wasapi, tuple(skipped), skipped_missing)
+            break
+        else:
+            default_name = default_input_name()
+            try:
+                stream = self._open_stream(session, None, wasapi=False)
+            except Exception as exc:
+                logging.warning("Windows-standaardmicrofoon kon niet worden geopend: %s", exc)
+                raise NoMicrophoneError(found=bool(default_name) or not skipped_missing) from exc
+            choice = InputChoice(None, default_name or "", 0, False, tuple(skipped), skipped_missing)
+        logging.info(
+            "Opname met %s (%s)%s", choice.name or "onbekende microfoon",
+            f"prioriteit {choice.priority}" if choice.priority else "Windows-standaard",
+            f"; niet beschikbaar: {', '.join(choice.skipped)}" if choice.skipped else "",
+        )
+        return stream, choice
+
+    def _open_stream(self, session: RecordingSession, device: int | None, *, wasapi: bool) -> sd.InputStream:
+        stream = sd.InputStream(
+            device=device,
+            samplerate=session.sample_rate,
+            channels=session.channels,
+            dtype="int16",
+            callback=self.audio_callback,
+            **({"extra_settings": sd.WasapiSettings(auto_convert=True)} if wasapi else {}),
+        )
+        try:
+            stream.start()
+        except Exception:
+            try:
+                stream.close()
+            except Exception:
+                logging.exception("Could not close failed input stream")
+            raise
+        return stream
 
     def stop_recording(self) -> None:
         with self.stream_transition_lock, windows_audio_thread():

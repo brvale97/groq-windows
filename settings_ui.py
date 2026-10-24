@@ -10,11 +10,12 @@ test) runs on a worker thread and reports back through a Qt signal.
 from __future__ import annotations
 
 import dataclasses
+import html
 import threading
 from typing import Protocol
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QKeySequence, QPainter, QShortcut
+from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QKeySequence, QPainter, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -48,6 +50,8 @@ from dictation_core import (
     normalize_custom_words,
     normalize_replacement_part,
     normalize_word_replacements,
+    short_device_name,
+    unavailable_microphones_text,
 )
 from history import MAX_HISTORY_ENTRIES, MAX_RECORDING_ENTRIES, HistoryEntry, RecordingEntry
 from hotkeys import HotkeyError, hotkey_from_key_press, normalize_hotkey_text, validate_hotkey
@@ -178,6 +182,40 @@ class ComboBox(QComboBox):
         color = QColor(theme.muted if self.isEnabled() else theme.field_border)
         size = 16
         draw_glyph(painter, "chevron", QRectF(self.width() - size - 10, (self.height() - size) / 2, size, size), color)
+
+
+class ElidedLabel(QLabel):
+    """Single-line label that ends in "…" instead of widening its row."""
+
+    def __init__(self, text: str = "", name: str | None = None) -> None:
+        super().__init__(text)
+        if name:
+            self.setObjectName(name)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(60)
+        self.setToolTip(text)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, rect.width())
+        self.style().drawItemText(
+            painter, rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            self.palette(), self.isEnabled(), text, QPalette.ColorRole.WindowText,
+        )
+
+
+def icon_button(glyph: str, tooltip: str) -> QPushButton:
+    widget = QPushButton()
+    widget.setProperty("variant", "icon")
+    widget.setIcon(icon(glyph))
+    widget.setIconSize(QSize(14, 14))
+    widget.setFixedSize(30, 30)
+    widget.setToolTip(tooltip)
+    widget.setAccessibleName(tooltip)
+    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    return widget
 
 
 class Card(QFrame):
@@ -526,7 +564,12 @@ class SettingsWindow(QWidget):
         self.players: dict[str, RecordingPlayer] = {}
         self.microphone_test_active = False
         self.microphone_test_used = False
+        self.microphone_test_name = ""
         self._loading = True
+        # Microphones in order of preference; Windows-standaard is the implicit last one.
+        self.device_priority: list[str] = list(config.input_devices)
+        self.device_labels: dict[str, str] = {}
+        self.default_device_name: str | None = None
         self.custom_words: list[str] = list(config.custom_words)
         self.word_replacements: list[tuple[str, str]] = list(config.word_replacements)
 
@@ -543,7 +586,7 @@ class SettingsWindow(QWidget):
 
         self._build_shell()
         self._build_pages()
-        self._load_devices(controller.list_input_devices(), config.input_device)
+        self._load_devices(controller.list_input_devices())
         self._loading = False
         self.select_page("dictate" if config.api_key else "connection")
         self._place_on_screen()
@@ -703,20 +746,32 @@ class SettingsWindow(QWidget):
         shortcut_card.body.addWidget(self.shortcut_hint)
         page.addWidget(shortcut_card)
 
-        mic_card = Card("Microfoon", "Standaard volgt de app de Windows-instelling voor opname.")
-        self.device_combo = ComboBox()
-        self.device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.device_combo.setMinimumContentsLength(18)
-        self.device_combo.currentIndexChanged.connect(self._device_changed)
+        mic_card = Card(
+            "Microfoons",
+            "De app neemt op met de eerste microfoon die verbonden is, van boven naar beneden. "
+            "Bij elke opname kijkt hij opnieuw.",
+        )
+        self.device_note = label("", "micNote", wrap=True)
+        self.device_note.setTextFormat(Qt.TextFormat.RichText)
+        self.device_note.hide()
+        mic_card.body.addWidget(self.device_note)
+        self.device_list = QFrame()
+        self.device_list.setObjectName("micList")
+        self.device_list_layout = QVBoxLayout(self.device_list)
+        self.device_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.device_list_layout.setSpacing(0)
+        mic_card.body.addWidget(self.device_list)
+        self.device_rows: list[QFrame] = []
+        self.windows_row: QFrame | None = None
+        self.add_device_button = button("Microfoon toevoegen", glyph="plus")
+        self.add_device_menu = QMenu(self.add_device_button)
+        self.add_device_menu.aboutToShow.connect(self._prepare_add_device_menu)
+        self.add_device_button.setMenu(self.add_device_menu)
         self.refresh_devices_button = button("Vernieuwen", glyph="refresh")
         self.refresh_devices_button.clicked.connect(self.refresh_devices)
         self.microphone_test_button = button("Microfoon testen", glyph="mic")
         self.microphone_test_button.clicked.connect(self.toggle_microphone_test)
-        row = hbox(self.device_combo, self.refresh_devices_button, self.microphone_test_button)
-        row.setStretch(0, 1)
-        mic_card.body.addLayout(row)
-        self.device_details_label = label("", "hint", wrap=True, selectable=True)
-        mic_card.body.addWidget(self.device_details_label)
+        mic_card.body.addLayout(hbox(self.add_device_button, self.refresh_devices_button, self.microphone_test_button, None))
 
         self.microphone_panel = QWidget()
         panel = QVBoxLayout(self.microphone_panel)
@@ -1256,48 +1311,172 @@ class SettingsWindow(QWidget):
 
     # -- microphones ---------------------------------------------------------
 
-    def _load_devices(self, options: list[tuple[str, str]], selected: str) -> None:
-        self.device_options = list(options)
-        self.device_labels = {device_id: text for device_id, text in self.device_options}
-        if selected not in self.device_labels:
-            text = f"Niet beschikbaar: {selected.removeprefix('wasapi:')}"
-            self.device_options.append((selected, text))
-            self.device_labels[selected] = text
-        self.device_combo.blockSignals(True)
-        self.device_combo.clear()
-        for device_id, text in self.device_options:
-            self.device_combo.addItem(text, device_id)
-            self.device_combo.setItemData(self.device_combo.count() - 1, text, Qt.ItemDataRole.ToolTipRole)
-        self.device_combo.setCurrentIndex(self.device_combo.findData(selected))
-        self.device_combo.blockSignals(False)
-        self._update_device_details()
+    def _load_devices(self, options: list[tuple[str, str]]) -> None:
+        """Connected microphones from the controller: ("", "Windows-standaard: …") first."""
+        self.device_labels = {device_id: text for device_id, text in options if device_id}
+        default_label = next((text for device_id, text in options if not device_id), "")
+        prefix = f"{DEFAULT_DEVICE_LABEL}: "
+        self.default_device_name = default_label.removeprefix(prefix) if default_label.startswith(prefix) else None
+        self._render_devices()
 
-    def selected_device_id(self) -> str:
-        value = self.device_combo.currentData()
-        return value if isinstance(value, str) else ""
+    def device_name(self, selector: str) -> str:
+        return self.device_labels.get(selector) or selector.removeprefix("wasapi:")
 
-    def selected_device_label(self) -> str:
-        return self.device_combo.currentText()
+    def active_device_id(self) -> str | None:
+        """What the next recording would use: a list entry, "" for Windows-standaard, None for nothing."""
+        for selector in self.device_priority:
+            if selector in self.device_labels:
+                return selector
+        return "" if self.default_device_name else None
 
-    def _device_changed(self, _index: int) -> None:
-        self._update_device_details()
+    def _render_devices(self) -> None:
+        self._clear_layout(self.device_list_layout)
+        self.device_rows = []
+        active = self.active_device_id()
+        editable = not self.microphone_test_active
+        for index, selector in enumerate(self.device_priority):
+            connected = selector in self.device_labels
+            if selector == active:
+                status = ("In gebruik", "active")
+            elif connected:
+                status = ("Beschikbaar", "")
+            else:
+                status = ("Niet verbonden", "danger")
+            row = self._device_row(str(index + 1), self.device_name(selector), "", status, first=index == 0)
+            row.setProperty("missing", "false" if connected else "true")
+            row.up_button = icon_button("chevron-up", "Omhoog")
+            row.up_button.setEnabled(editable and index > 0)
+            row.up_button.clicked.connect(lambda _checked=False, i=index: self.move_device(i, -1))
+            row.down_button = icon_button("chevron-down", "Omlaag")
+            row.down_button.setEnabled(editable and index < len(self.device_priority) - 1)
+            row.down_button.clicked.connect(lambda _checked=False, i=index: self.move_device(i, 1))
+            row.remove_button = icon_button("close", "Verwijderen")
+            row.remove_button.setEnabled(editable)
+            row.remove_button.clicked.connect(lambda _checked=False, i=index: self.remove_device(i))
+            for widget in (row.up_button, row.down_button, row.remove_button):
+                row.layout().addWidget(widget)
+            self.device_list_layout.addWidget(row)
+            self.device_rows.append(row)
+        if active == "":
+            status = ("In gebruik", "active")
+        elif self.default_device_name:
+            status = ("Vangnet", "muted")
+        else:
+            status = ("Niet verbonden", "danger")
+        current = f"Nu: {self.default_device_name}" if self.default_device_name else "Nu: geen microfoon"
+        self.windows_row = self._device_row(
+            None, DEFAULT_DEVICE_LABEL, f"{current} · altijd als laatste", status, first=not self.device_priority,
+        )
+        self.windows_row.setProperty("fixed", "true")
+        self.device_list_layout.addWidget(self.windows_row)
+        self._update_device_note(active)
+
+    def _device_row(self, number: str | None, name: str, detail: str, status: tuple[str, str], *, first: bool) -> QFrame:
+        row = QFrame()
+        row.setObjectName("micRow")
+        row.setProperty("first", "true" if first else "false")
+        row.setProperty("active", "true" if status[1] == "active" else "false")
+        layout = QHBoxLayout(row)
+        # The active row has a 3 px accent bar on the left; keep the numbers aligned.
+        layout.setContentsMargins(9 if status[1] == "active" else 12, 7, 10, 7)
+        layout.setSpacing(8)
+        marker = QLabel(number or "")
+        marker.setObjectName("micNumber")
+        marker.setFixedSize(24, 24)
+        marker.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if number is None:
+            marker.setPixmap(icon("lock", "muted").pixmap(QSize(13, 13)))
+        layout.addWidget(marker)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        row.name_label = ElidedLabel(name, "micName")
+        text.addWidget(row.name_label)
+        if detail:
+            row.detail_label = ElidedLabel(detail, "hint")
+            text.addWidget(row.detail_label)
+        layout.addLayout(text, 1)
+        row.status_badge = label(status[0], "badge")
+        if status[1]:
+            row.status_badge.setProperty("tone", status[1])
+        layout.addWidget(row.status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        return row
+
+    def _update_device_note(self, active: str | None) -> None:
+        if active is None:
+            text, tone = (
+                "<b>Geen microfoon gevonden.</b> Verbind je headset of sluit een microfoon aan en klik op Vernieuwen.",
+                "danger",
+            )
+        else:
+            position = self.device_priority.index(active) if active else len(self.device_priority)
+            skipped = [short_device_name(self.device_name(selector)) for selector in self.device_priority[:position]]
+            if not skipped:
+                self.device_note.hide()
+                return
+            used = (
+                f"prioriteit {position + 1}: {short_device_name(self.device_name(active))}" if active
+                else f"{DEFAULT_DEVICE_LABEL} ({short_device_name(self.default_device_name or '')})"
+            )
+            text = f"<b>{html.escape(unavailable_microphones_text(skipped))}.</b> De app gebruikt nu {html.escape(used)}."
+            tone = "warning"
+        self.device_note.setText(text)
+        self.device_note.setProperty("tone", tone)
+        repolish(self.device_note)
+        self.device_note.show()
+
+    def addable_devices(self) -> list[tuple[str, str]]:
+        return [(device_id, text) for device_id, text in self.device_labels.items() if device_id not in self.device_priority]
+
+    def _prepare_add_device_menu(self) -> None:
+        # A headset that was just connected should be offered right away.
+        self.refresh_devices()
+        menu = self.add_device_menu
+        menu.clear()
+        menu.addAction("Aangesloten microfoons").setEnabled(False)
+        addable = self.addable_devices()
+        for device_id, text in addable:
+            menu.addAction(text, lambda selector=device_id: self.add_device(selector))
+        if not addable:
+            menu.addAction("Alle aangesloten microfoons staan al in de lijst.").setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Headset niet in de lijst? Verbind hem eerst; Windows toont alleen verbonden microfoons.").setEnabled(False)
+
+    def add_device(self, selector: str) -> None:
+        if selector and selector not in self.device_priority:
+            self.device_priority.append(selector)
+            self._priority_changed()
+
+    def move_device(self, index: int, delta: int) -> None:
+        target = index + delta
+        if 0 <= index < len(self.device_priority) and 0 <= target < len(self.device_priority):
+            devices = self.device_priority
+            devices[index], devices[target] = devices[target], devices[index]
+            self._priority_changed()
+
+    def remove_device(self, index: int) -> None:
+        if 0 <= index < len(self.device_priority):
+            del self.device_priority[index]
+            self._priority_changed()
+
+    def _priority_changed(self) -> None:
+        self._render_devices()
         if self.microphone_test_used and not self.microphone_test_active:
             self._close_microphone_test()
             self.microphone_panel.hide()
         self.mark_dirty()
 
-    def _update_device_details(self) -> None:
-        self.device_details_label.setText(f"Geselecteerd: {self.selected_device_label()}")
-        self.device_combo.setToolTip(self.selected_device_label())
+    def _set_device_editing(self, enabled: bool) -> None:
+        self.add_device_button.setEnabled(enabled)
+        self.refresh_devices_button.setEnabled(enabled)
+        self._render_devices()
 
     def refresh_devices(self) -> None:
-        current_id = self.selected_device_id()
         try:
             options = self.controller.list_input_devices(refresh=True)
         except Exception as exc:
             self.set_status(f"Microfoons vernieuwen mislukt: {exc}")
             return
-        self._load_devices(options, current_id)
+        self._load_devices(options)
         self.set_status(f"{max(0, len(options) - 1)} microfoon(s) gevonden.", dirty_style=self.dirty)
 
     def toggle_microphone_test(self) -> None:
@@ -1311,16 +1490,20 @@ class SettingsWindow(QWidget):
         self.microphone_panel.show()
         self.microphone_listen_button.setEnabled(False)
         self.microphone_test_used = True
+        selector = self.active_device_id()
+        if selector is None:
+            self.microphone_result_label.setText("Geen microfoon gevonden. Verbind je headset of sluit een microfoon aan.")
+            return
+        self.microphone_test_name = short_device_name(self.device_name(selector) if selector else self.default_device_name or "")
         try:
-            self.controller.start_microphone_test(self.selected_device_id())
+            self.controller.start_microphone_test(selector)
         except Exception as exc:
             self.microphone_result_label.setText(f"Microfoon kon niet worden geopend: {exc}")
             return
         self.microphone_test_active = True
         self.microphone_test_button.setText("Stop test")
         self.microphone_test_button.setIcon(icon("stop", "danger", "danger"))
-        self.device_combo.setEnabled(False)
-        self.refresh_devices_button.setEnabled(False)
+        self._set_device_editing(False)
         self.microphone_timer.start()
         self._microphone_tick()
 
@@ -1328,17 +1511,18 @@ class SettingsWindow(QWidget):
         status = self.controller.microphone_test_status()
         self.microphone_level.setValue(round(status.level * 100))
         if status.state in ("opening", "recording"):
+            name = self.microphone_test_name
             self.microphone_result_label.setText(
-                "Microfoon openen…" if status.state == "opening"
-                else f"Zeg een paar woorden… {min(status.elapsed, status.duration):.1f} / {status.duration:.0f} seconden"
+                f"{name} openen…" if status.state == "opening"
+                else f"Zeg een paar woorden in {name}… "
+                     f"{min(status.elapsed, status.duration):.1f} / {status.duration:.0f} seconden"
             )
             return
         self.microphone_timer.stop()
         self.microphone_test_active = False
         self.microphone_test_button.setText("Opnieuw testen")
         self.microphone_test_button.setIcon(icon("mic"))
-        self.device_combo.setEnabled(True)
-        self.refresh_devices_button.setEnabled(True)
+        self._set_device_editing(True)
         self.microphone_level.setValue(0)
         if status.state == "ready":
             self.microphone_listen_button.setEnabled(True)
@@ -1391,8 +1575,7 @@ class SettingsWindow(QWidget):
         self.microphone_test_button.setText("Microfoon testen")
         self.microphone_test_button.setIcon(icon("mic"))
         self.microphone_listen_button.setEnabled(False)
-        self.device_combo.setEnabled(True)
-        self.refresh_devices_button.setEnabled(True)
+        self._set_device_editing(True)
         self.microphone_level.setValue(0)
 
     # -- shortcut capture ----------------------------------------------------
@@ -1553,7 +1736,7 @@ class SettingsWindow(QWidget):
             custom_words=normalized_words,
             word_replacements=normalized_replacements,
             shortcut=normalized_shortcut,
-            input_device=self.selected_device_id(),
+            input_devices=tuple(self.device_priority),
             paste_after_transcription=self.paste_switch.isChecked(),
             remove_final_period=self.remove_period_switch.isChecked(),
             auto_paragraphs=self.paragraphs_switch.isChecked(),

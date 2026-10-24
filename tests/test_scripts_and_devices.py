@@ -69,26 +69,107 @@ class InputDeviceResolutionTests(unittest.TestCase):
         import engine
         from config_store import Config
 
-    def _engine(self) -> "engine.DictationEngine":
+    SOUNDCORE = "wasapi:Headset Microphone (Soundcore Motion Boom)"
+    RODE = "wasapi:Microfoon (Rode NT-USB Mini)"
+
+    def open_input(self, selectors, *, connected=(), broken=(), default="Microfoonmatrix (Realtek(R) Audio)",
+                   default_opens=True):
+        """Run _open_input against fake devices; returns (choice or error, opened devices, calls)."""
+        indices = {selector: index for index, selector in enumerate(connected, start=10)}
+        calls = []
+        opened = []
+
+        def resolve(selector):
+            calls.append(("resolve", selector))
+            if selector not in indices:
+                raise RuntimeError(f"Microfoon {selector!r} is niet aangesloten of niet beschikbaar.")
+            return indices[selector]
+
+        class FakeStream:
+            def __init__(self, *, device, **kwargs):
+                self.device, self.kwargs, self.closed = device, kwargs, False
+
+            def start(self):
+                broken_devices = {indices[selector] for selector in broken}
+                if self.device in broken_devices or (self.device is None and not default_opens):
+                    raise RuntimeError("Device unavailable [PaErrorCode -9985]")
+                opened.append(self.device)
+
+            def close(self):
+                self.closed = True
+
         dictation = engine.DictationEngine.__new__(engine.DictationEngine)
-        dictation.input_device = None
-        dictation.input_device_error = None
-        return dictation
+        dictation.refresh_inputs = lambda: calls.append(("refresh",))
+        dictation.audio_callback = lambda *args: None
+        session = engine.RecordingSession(
+            input_device=None, sample_rate=16_000, channels=1, model="m", language="nl", prompt="",
+            word_replacements=(), paste_after_transcription=True, remove_final_period=False, client=object(),
+        )
+        with (
+            mock.patch.object(engine, "resolve_input_device", side_effect=resolve),
+            mock.patch.object(engine, "default_input_name", return_value=default),
+            mock.patch.object(engine.sd, "InputStream", FakeStream, create=True),
+            mock.patch.object(engine.sd, "WasapiSettings", lambda **kwargs: kwargs, create=True),
+        ):
+            try:
+                stream, choice = dictation._open_input(tuple(selectors), session)
+            except engine.NoMicrophoneError as exc:
+                return exc, opened, calls
+        self.assertEqual(stream.device, choice.device)
+        return choice, opened, calls
 
-    def test_a_missing_microphone_does_not_raise(self) -> None:
-        dictation = self._engine()
-        with mock.patch.object(engine, "resolve_input_device", side_effect=RuntimeError("Geen input device gevonden voor 'Yeti'.")):
-            dictation._resolve_device(Config(input_device="Yeti"))
-        self.assertIsNone(dictation.input_device)
-        self.assertIn("Yeti", dictation.input_device_error or "")
+    def test_the_first_connected_microphone_wins_and_the_list_is_read_again_first(self) -> None:
+        choice, opened, calls = self.open_input([self.SOUNDCORE, self.RODE], connected=[self.SOUNDCORE, self.RODE])
+        self.assertEqual(calls[0], ("refresh",))
+        self.assertEqual((choice.priority, choice.name, choice.wasapi, choice.fallback), (1, "Headset Microphone (Soundcore Motion Boom)", True, False))
+        self.assertEqual(opened, [10])
 
-    def test_a_working_microphone_clears_an_earlier_error(self) -> None:
-        dictation = self._engine()
-        dictation.input_device_error = "oud probleem"
-        with mock.patch.object(engine, "resolve_input_device", return_value=3):
-            dictation._resolve_device(Config(input_device="3"))
-        self.assertEqual(dictation.input_device, 3)
-        self.assertIsNone(dictation.input_device_error)
+    def test_a_disconnected_headset_falls_back_to_the_next_priority(self) -> None:
+        choice, opened, _calls = self.open_input([self.SOUNDCORE, self.RODE], connected=[self.RODE])
+        self.assertEqual((choice.priority, choice.name), (2, "Microfoon (Rode NT-USB Mini)"))
+        self.assertEqual(choice.skipped, ("Headset Microphone (Soundcore Motion Boom)",))
+        self.assertTrue(choice.skipped_missing)
+        self.assertTrue(choice.fallback)
+        self.assertEqual(opened, [10])
+
+    def test_a_microphone_that_cannot_be_opened_is_skipped_too(self) -> None:
+        choice, opened, _calls = self.open_input(
+            [self.SOUNDCORE, self.RODE], connected=[self.SOUNDCORE, self.RODE], broken=[self.SOUNDCORE],
+        )
+        self.assertEqual(choice.priority, 2)
+        self.assertFalse(choice.skipped_missing)
+        self.assertEqual(opened, [11])
+
+    def test_the_windows_default_is_the_last_resort(self) -> None:
+        choice, opened, _calls = self.open_input([self.SOUNDCORE, self.RODE])
+        self.assertEqual((choice.priority, choice.device, choice.wasapi), (0, None, False))
+        self.assertEqual(choice.name, "Microfoonmatrix (Realtek(R) Audio)")
+        self.assertEqual(len(choice.skipped), 2)
+        self.assertEqual(opened, [None])
+
+    def test_an_empty_list_just_uses_the_windows_default(self) -> None:
+        choice, opened, calls = self.open_input([])
+        self.assertEqual((choice.priority, choice.fallback), (0, False))
+        self.assertEqual(calls, [("refresh",)])
+        self.assertEqual(opened, [None])
+
+    def test_no_microphone_at_all_is_reported(self) -> None:
+        error, opened, _calls = self.open_input([self.SOUNDCORE], default=None, default_opens=False)
+        self.assertIsInstance(error, engine.NoMicrophoneError)
+        self.assertFalse(error.found)
+        self.assertIn("Geen microfoon gevonden", str(error))
+        self.assertEqual(opened, [])
+        error, _opened, _calls = self.open_input([self.SOUNDCORE], default_opens=False)
+        self.assertTrue(error.found)  # Windows has a default microphone, it just would not open.
+        self.assertIn("kon worden geopend", str(error))
+
+    def test_a_failing_refresh_does_not_block_the_recording(self) -> None:
+        dictation = engine.DictationEngine.__new__(engine.DictationEngine)
+        dictation.refresh_inputs = mock.Mock(side_effect=RuntimeError("PortAudio"))
+        dictation._open_stream = mock.Mock(return_value="stream")
+        with mock.patch.object(engine, "default_input_name", return_value="Realtek"):
+            stream, choice = dictation._open_input((), mock.Mock())
+        self.assertEqual((stream, choice.name), ("stream", "Realtek"))
 
     def test_windows_default_shows_the_real_endpoint_instead_of_sound_mapper(self):
         devices = [

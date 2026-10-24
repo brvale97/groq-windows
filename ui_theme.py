@@ -55,6 +55,8 @@ class Theme:
     danger: str
     success: str
     warning_text: str
+    warning_soft: str
+    danger_soft: str
     selection: str
 
 
@@ -81,6 +83,8 @@ LIGHT = Theme(
     danger="#b3261e",
     success="#1b7f5a",
     warning_text="#8a5a00",
+    warning_soft="#fdf3dc",
+    danger_soft="#fbe9e7",
     selection="#cfe8de",
 )
 
@@ -107,6 +111,8 @@ DARK = Theme(
     danger="#ff8a80",
     success="#6fd3a8",
     warning_text="#f0c36b",
+    warning_soft="#3a311c",
+    danger_soft="#3d2523",
     selection="#245244",
 )
 
@@ -175,6 +181,22 @@ QLabel#status[dirty="true"] {{ color: {warning_text}; font-weight: 600; }}
 QFrame#card QLabel#badge {{ color: {accent_text}; background: {accent_soft}; border-radius: 9px; padding: 1px 9px; font-size: 9pt; font-weight: 600; }}
 QFrame#card QLabel#badge[tone="danger"] {{ color: {danger}; background: transparent; border: 1px solid {danger}; }}
 QFrame#card QLabel#badge[tone="muted"] {{ color: {muted}; background: {button}; }}
+QFrame#card QLabel#badge[tone="active"] {{ color: {on_accent}; background: {accent}; }}
+QFrame#micList {{ background: {card}; border: 1px solid {card_border}; border-radius: 8px; }}
+QFrame#micRow {{ background: transparent; border: none; border-top: 1px solid {card_border}; }}
+QFrame#micRow[first="true"] {{ border-top: none; }}
+QFrame#micRow[active="true"] {{ border-left: 3px solid {accent}; }}
+QFrame#micRow[fixed="true"] {{
+    background: {content}; border-top: 1px dashed {field_border};
+    border-bottom-left-radius: 7px; border-bottom-right-radius: 7px;
+}}
+QFrame#micRow[fixed="true"][first="true"] {{ border-top: none; border-radius: 7px; }}
+QFrame#card QLabel#micNumber {{ background: {accent_soft}; color: {accent_text}; border-radius: 12px; font-size: 9pt; font-weight: 600; }}
+QFrame#micRow[missing="true"] QLabel#micNumber, QFrame#micRow[fixed="true"] QLabel#micNumber {{ background: {button}; color: {muted}; }}
+QFrame#micRow[missing="true"] QLabel#micName {{ color: {muted}; }}
+QFrame#card QLabel#micNote {{ border-radius: 8px; padding: 8px 11px; }}
+QFrame#card QLabel#micNote[tone="warning"] {{ color: {warning_text}; background: {warning_soft}; }}
+QFrame#card QLabel#micNote[tone="danger"] {{ color: {danger}; background: {danger_soft}; }}
 QFrame#card {{ background: {card}; border: 1px solid {card_border}; border-radius: 10px; }}
 QFrame#card QLabel {{ background: transparent; }}
 QFrame#footer {{ background: {content}; border: none; border-top: 1px solid {card_border}; }}
@@ -192,6 +214,7 @@ QPushButton[variant="primary"]:hover {{ background: {accent_hover}; }}
 QPushButton[variant="primary"]:pressed {{ background: {accent_pressed}; }}
 QPushButton[variant="primary"]:disabled {{ background: {accent_soft}; color: {disabled_text}; }}
 QPushButton[variant="primary"]:focus {{ border: 1px solid {on_accent}; }}
+QPushButton[variant="icon"] {{ padding: 0; min-height: 0; border-radius: 7px; }}
 QPushButton[variant="ghost"] {{ background: transparent; color: {accent_text}; padding: 6px 12px; }}
 QPushButton[variant="ghost"]:hover {{ background: {accent_soft}; }}
 QPushButton[variant="ghost"]:pressed {{ background: {selection}; }}
@@ -311,13 +334,15 @@ def draw_glyph(painter: QPainter, name: str, rect: QRectF, color: QColor) -> Non
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     _pen(painter, color, unit)
-    if name == "mic":
+    if name in {"mic", "mic-off"}:
         painter.drawRoundedRect(r(9, 3, 6, 11.5), 3 * unit, 3 * unit)
         path = QPainterPath(p(5.5, 11))
         path.cubicTo(p(5.5, 19), p(18.5, 19), p(18.5, 11))
         painter.drawPath(path)
         painter.drawLine(p(12, 17.5), p(12, 21))
         painter.drawLine(p(8.5, 21), p(15.5, 21))
+        if name == "mic-off":
+            painter.drawLine(p(4, 3.5), p(20, 20.5))
     elif name == "history":
         painter.drawArc(r(3.5, 3.5, 17, 17), 200 * 16, -310 * 16)
         painter.drawLine(p(4.3, 8.2), p(4.6, 12.0))
@@ -450,11 +475,31 @@ def draw_glyph(painter: QPainter, name: str, rect: QRectF, color: QColor) -> Non
         for x in (6, 9.5, 13, 16.5):
             painter.drawPoint(p(x + 0.5, 10))
         painter.drawLine(p(8, 14.5), p(16, 14.5))
-    elif name == "chevron":
+    elif name in {"chevron", "chevron-down"}:
         path = QPainterPath(p(6.5, 9.5))
         path.lineTo(p(12, 15))
         path.lineTo(p(17.5, 9.5))
         painter.drawPath(path)
+    elif name == "chevron-up":
+        path = QPainterPath(p(6.5, 14.5))
+        path.lineTo(p(12, 9))
+        path.lineTo(p(17.5, 14.5))
+        painter.drawPath(path)
+    elif name == "close":
+        painter.drawLine(p(6.5, 6.5), p(17.5, 17.5))
+        painter.drawLine(p(17.5, 6.5), p(6.5, 17.5))
+    elif name == "lock":
+        painter.drawRoundedRect(r(5, 10.5, 14, 10), 2 * unit, 2 * unit)
+        path = QPainterPath(p(8, 10.5))
+        path.lineTo(p(8, 7.5))
+        path.cubicTo(p(8, 2.2), p(16, 2.2), p(16, 7.5))
+        path.lineTo(p(16, 10.5))
+        painter.drawPath(path)
+    elif name == "windows":
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        for x, y in ((3, 3), (12.8, 3), (3, 12.8), (12.8, 12.8)):
+            painter.drawRoundedRect(r(x, y, 8.2, 8.2), 1 * unit, 1 * unit)
     elif name == "plus":
         painter.drawLine(p(12, 5), p(12, 19))
         painter.drawLine(p(5, 12), p(19, 12))

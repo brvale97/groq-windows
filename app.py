@@ -36,13 +36,19 @@ from PySide6.QtWidgets import (  # noqa: E402
 import config_store  # noqa: E402
 import updater  # noqa: E402
 from audio_player import AudioPlayer, PlaybackStatus  # noqa: E402
-from config_store import APP_NAME, Config, load_config, save_config, setup_logging  # noqa: E402
-from dictation_core import DEFAULT_DEVICE_LABEL, clipboard_text  # noqa: E402
+from config_store import APP_NAME, Config, load_config, normalize_input_devices, save_config, setup_logging  # noqa: E402
+from dictation_core import (  # noqa: E402
+    DEFAULT_DEVICE_LABEL,
+    clipboard_text,
+    short_device_name,
+    unavailable_microphones_text,
+)
 from engine import (  # noqa: E402
     WAVE_BAR_COUNT,
     WAVE_TICK_MS,
     DictationEngine,
     Groq,
+    InputChoice,
     ensure_sounds,
     input_devices,
     resolve_input_device,
@@ -69,6 +75,13 @@ SPLASH_MIN_VISIBLE_MS = 900
 SPLASH_READY_VISIBLE_MS = 350
 SPLASH_TRAY_TIMEOUT_MS = 10_000
 NOTICE_VISIBLE_MS = 3000
+NO_MICROPHONE_VISIBLE_MS = 6000
+# After switching to a lower-priority microphone a card above the recording
+# pill says so for a few seconds; a small badge in the pill stays.
+INPUT_NOTICE_MS = 3000
+INPUT_NOTICE_GAP = 8
+INPUT_NOTICE_MAX_WIDTH = 480
+RECORDING_BADGE_WIDTH = 22
 
 
 def bottom_centered_position(width: int, height: int, area: QRect, bottom_offset: int = BUBBLE_BOTTOM_OFFSET) -> tuple[int, int]:
@@ -123,6 +136,7 @@ class EngineBridge(QObject):
 
     status = Signal(str)
     state = Signal(str)
+    input_selected = Signal(object)
     recordings_changed = Signal()
     invoke = Signal(object)
 
@@ -186,6 +200,12 @@ class StatusBubble(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.state = "idle"
         self.message = ""
+        self.notice_detail = ""
+        self.notice_glyph = "warning"
+        # A notice about the microphones opens Settings on that page when clicked.
+        self.opens_microphone_settings = False
+        self.input_choice: InputChoice | None = None
+        self.input_notice_visible = False
         self.wave_levels = [0.0] * WAVE_BAR_COUNT
         self.wave_envelope = 0.0
         self.audio_level_provider = lambda: 0.0
@@ -201,6 +221,10 @@ class StatusBubble(QWidget):
         self.hide_timer = QTimer(self)
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self.hide)
+        self.input_notice_timer = QTimer(self)
+        self.input_notice_timer.setSingleShot(True)
+        self.input_notice_timer.setInterval(INPUT_NOTICE_MS)
+        self.input_notice_timer.timeout.connect(self.hide_input_notice)
         self.setWindowTitle(f"{APP_NAME} - Klaar")
         self.winId()  # Create the native window now so its styles are in place before the first show.
         make_non_activating(self)
@@ -214,6 +238,14 @@ class StatusBubble(QWidget):
 
     def resize_pill(self, width: int, height: int) -> None:
         self.pill_size = QSize(width, height)
+        self.fit_window()
+
+    def fit_window(self) -> None:
+        width, height = self.pill_size.width(), self.pill_size.height()
+        if self.input_notice_visible:
+            card = self.input_notice_size()
+            width = max(width, card.width())
+            height += card.height() + INPUT_NOTICE_GAP
         self.setFixedSize(width + 2 * BUBBLE_MARGIN, height + 2 * BUBBLE_MARGIN)
 
     def position(self) -> None:
@@ -239,9 +271,31 @@ class StatusBubble(QWidget):
 
     # -- states --------------------------------------------------------------
 
+    def set_input(self, choice: InputChoice | None) -> None:
+        """Microphone of the next recording; only a fallback is shown."""
+        self.input_choice = choice if choice is not None and choice.fallback else None
+
+    def hide_input_notice(self) -> None:
+        self.input_notice_timer.stop()
+        if not self.input_notice_visible:
+            return
+        self.input_notice_visible = False
+        self.fit_window()
+        if self.isVisible():
+            self.position()
+        self.update()
+
     def set_state(self, state: str, schedule_hide: bool = True) -> None:
         self.state = state
         self.stop_animations()
+        self.opens_microphone_settings = False
+        if state != "recording":
+            self.input_choice = None
+        self.input_notice_visible = state == "recording" and self.input_choice is not None
+        if self.input_notice_visible:
+            self.input_notice_timer.start()
+        else:
+            self.input_notice_timer.stop()
         titles = {"idle": "Klaar", "recording": "Opname", "processing": "Transcriptie"}
         self.setWindowTitle(f"{APP_NAME} - {titles.get(state, titles['idle'])}")
         if state == "idle":
@@ -257,17 +311,31 @@ class StatusBubble(QWidget):
         self.show_bubble()
         self.update()
 
-    def show_notice(self, message: str) -> None:
+    def show_notice(
+        self, message: str, detail: str = "", *, glyph: str = "warning",
+        visible_ms: int = NOTICE_VISIBLE_MS, opens_microphone_settings: bool = False,
+    ) -> None:
         self.stop_animations()
         self.state = "notice"
         self.message = message
-        font = self._font(10, QFont.Weight.DemiBold)
-        width = 58 + QFontMetrics(font).horizontalAdvance(message) + 20
-        self.resize_pill(max(200, width), 48)
+        self.notice_detail = detail
+        self.notice_glyph = glyph
+        self.opens_microphone_settings = opens_microphone_settings
+        self.input_choice = None
+        self.input_notice_visible = False
+        self.input_notice_timer.stop()
+        title_metrics = QFontMetrics(self._font(10, QFont.Weight.DemiBold))
+        width = 58 + title_metrics.horizontalAdvance(message) + 20
+        height = 48
+        if detail:
+            detail_metrics = QFontMetrics(self._font(9))
+            width = max(width, 58 + detail_metrics.horizontalAdvance(detail) + 22)
+            height = max(height, 24 + title_metrics.height() + 2 + detail_metrics.height())
+        self.resize_pill(max(200, width), height)
         self.setWindowTitle(f"{APP_NAME} - {message}")
         self.show_bubble()
         self.update()
-        self.schedule_hide()
+        self.schedule_hide(visible_ms)
 
     def start_wave(self) -> None:
         self.recording_started_at = time.perf_counter()
@@ -287,7 +355,7 @@ class StatusBubble(QWidget):
         minute_digits = len(self.elapsed_label().split(":")[0])
         timer_width = max(metrics.horizontalAdvance(f"{digit * minute_digits}:{digit * 2}")
                           for digit in "0123456789")
-        width = 20 + WAVE_BAR_COUNT * 5 + 8 + timer_width + self.TIMER_STOP_GAP + 30 + 10
+        width = 20 + self.badge_width() + WAVE_BAR_COUNT * 5 + 8 + timer_width + self.TIMER_STOP_GAP + 30 + 10
         if self.pill_size.width() != width:
             self.resize_pill(width, 48)
             if self.isVisible():
@@ -308,8 +376,11 @@ class StatusBubble(QWidget):
     # -- input ---------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.on_click()
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.input_notice_visible and not self._pill_rect().contains(event.position()):
+            return  # The card above only informs; the pill below stops the recording.
+        self.on_click()
 
     # -- painting ------------------------------------------------------------
 
@@ -321,7 +392,94 @@ class StatusBubble(QWidget):
         return font
 
     def _pill_rect(self) -> QRectF:
-        return QRectF(BUBBLE_MARGIN, BUBBLE_MARGIN, self.pill_size.width(), self.pill_size.height())
+        # The pill sits at the bottom, centred; a notice card may sit above it.
+        width, height = self.pill_size.width(), self.pill_size.height()
+        return QRectF((self.width() - width) / 2, self.height() - BUBBLE_MARGIN - height, width, height)
+
+    def badge_width(self) -> int:
+        return RECORDING_BADGE_WIDTH if self.input_choice is not None else 0
+
+    def input_notice_texts(self) -> tuple[str, str]:
+        choice = self.input_choice
+        if choice is None:
+            return "", ""
+        name = short_device_name(choice.name) or DEFAULT_DEVICE_LABEL
+        detail = unavailable_microphones_text(
+            [short_device_name(skipped) for skipped in choice.skipped], connected=choice.skipped_missing,
+        )
+        if not choice.priority and name != DEFAULT_DEVICE_LABEL:
+            detail += f" · {DEFAULT_DEVICE_LABEL}"
+        return f"Overgeschakeld naar {name}", detail
+
+    def input_notice_size(self) -> QSize:
+        title, detail = self.input_notice_texts()
+        title_metrics = QFontMetrics(self._font(10, QFont.Weight.DemiBold))
+        detail_metrics = QFontMetrics(self._font(9))
+        text_width = max(title_metrics.horizontalAdvance(title), detail_metrics.horizontalAdvance(detail))
+        width = min(INPUT_NOTICE_MAX_WIDTH, 12 + 26 + 10 + text_width + 18)
+        return QSize(width, 20 + title_metrics.height() + 2 + detail_metrics.height())
+
+    def _input_notice_rect(self) -> QRectF:
+        size = self.input_notice_size()
+        return QRectF((self.width() - size.width()) / 2, BUBBLE_MARGIN, size.width(), size.height())
+
+    def _paint_surface(self, painter: QPainter, rect: QRectF, radius: float, theme, border: QColor | None = None) -> None:
+        # Soft shadow: stacked translucent outlines, cheaper than a blur effect.
+        for step in range(BUBBLE_MARGIN, 0, -2):
+            shadow = QColor(0, 0, 0, round(30 * (1 - step / BUBBLE_MARGIN) ** 2) + 2)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(shadow)
+            grown = rect.adjusted(-step * 0.6, -step * 0.35, step * 0.6, step * 0.75)
+            painter.drawRoundedRect(grown, radius + step * 0.5, radius + step * 0.5)
+        fill = QColor("#202624") if theme.dark else QColor("#ffffff")
+        fill.setAlpha(246)
+        if border is None:
+            border = QColor(255, 255, 255, 28) if theme.dark else QColor(0, 0, 0, 22)
+        painter.setPen(border)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, radius, radius)
+
+    def _paint_priority_badge(self, painter: QPainter, rect: QRectF, theme, points: float) -> None:
+        amber = QColor(theme.warning_text)
+        soft = QColor(amber)
+        soft.setAlpha(40)
+        ring = QColor(amber)
+        ring.setAlpha(110)
+        painter.setPen(ring)
+        painter.setBrush(soft)
+        painter.drawEllipse(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        choice = self.input_choice
+        if choice is not None and choice.priority:
+            painter.setPen(amber)
+            painter.setFont(self._font(points, QFont.Weight.Bold))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(choice.priority))
+        else:
+            inset = rect.width() * 0.27
+            draw_glyph(painter, "windows", rect.adjusted(inset, inset, -inset, -inset), amber)
+
+    def _paint_input_notice(self, painter: QPainter, theme) -> None:
+        card = self._input_notice_rect()
+        border = QColor(theme.warning_text)
+        border.setAlpha(90)
+        self._paint_surface(painter, card, 16, theme, border)
+        badge = QRectF(card.left() + 12, card.center().y() - 13, 26, 26)
+        self._paint_priority_badge(painter, badge, theme, 9.5)
+        title, detail = self.input_notice_texts()
+        text_left = badge.right() + 10
+        text_width = card.right() - 16 - text_left
+        title_font = self._font(10, QFont.Weight.DemiBold)
+        detail_font = self._font(9)
+        title_height = QFontMetrics(title_font).height()
+        top = card.top() + 10
+        painter.setPen(QColor(theme.text))
+        painter.setFont(title_font)
+        painter.drawText(QRectF(text_left, top, text_width, title_height), Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(title_font).elidedText(title, Qt.TextElideMode.ElideRight, int(text_width)))
+        painter.setPen(QColor(theme.muted))
+        painter.setFont(detail_font)
+        painter.drawText(QRectF(text_left, top + title_height + 2, text_width, QFontMetrics(detail_font).height()),
+                         Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(detail_font).elidedText(detail, Qt.TextElideMode.ElideRight, int(text_width)))
 
     def paintEvent(self, _event) -> None:
         if self.state == "idle":
@@ -329,32 +487,24 @@ class StatusBubble(QWidget):
         theme = current_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.input_notice_visible and self.state == "recording":
+            self._paint_input_notice(painter, theme)
         pill = self._pill_rect()
-        radius = pill.height() / 2
-        # Soft shadow: stacked translucent outlines, cheaper than a blur effect.
-        for step in range(BUBBLE_MARGIN, 0, -2):
-            shadow = QColor(0, 0, 0, round(30 * (1 - step / BUBBLE_MARGIN) ** 2) + 2)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(shadow)
-            grown = pill.adjusted(-step * 0.6, -step * 0.35, step * 0.6, step * 0.75)
-            painter.drawRoundedRect(grown, radius + step * 0.5, radius + step * 0.5)
-        fill = QColor("#202624") if theme.dark else QColor("#ffffff")
-        fill.setAlpha(246)
-        border = QColor(255, 255, 255, 28) if theme.dark else QColor(0, 0, 0, 22)
-        painter.setPen(border)
-        painter.setBrush(fill)
-        painter.drawRoundedRect(pill, radius, radius)
+        self._paint_surface(painter, pill, min(24.0, pill.height() / 2), theme)
         text_color = QColor(theme.text)
         if self.state == "recording":
-            self._paint_recording(painter, pill, fill, text_color)
+            self._paint_recording(painter, pill, theme, text_color)
         elif self.state == "processing":
             self._paint_processing(painter, pill, theme, text_color)
         elif self.state == "notice":
             self._paint_notice(painter, pill, theme)
 
-    def _paint_recording(self, painter: QPainter, pill: QRectF, fill: QColor, text_color: QColor) -> None:
+    def _paint_recording(self, painter: QPainter, pill: QRectF, theme, text_color: QColor) -> None:
         middle = pill.center().y()
         left = pill.left() + 20
+        if self.input_choice is not None:
+            self._paint_priority_badge(painter, QRectF(pill.left() + 14, middle - 10, 20, 20), theme, 8.5)
+            left += RECORDING_BADGE_WIDTH
         red = QColor(RECORD_RED)
         for index, height in enumerate(self.bar_heights()):
             color = QColor(red)
@@ -407,11 +557,25 @@ class StatusBubble(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(soft)
         painter.drawEllipse(badge)
-        draw_glyph(painter, "warning", badge.adjusted(5, 5, -5, -5), tone)
+        draw_glyph(painter, self.notice_glyph, badge.adjusted(5, 5, -5, -5), tone)
+        title_font = self._font(10, QFont.Weight.DemiBold)
         painter.setPen(QColor(theme.text))
-        painter.setFont(self._font(10, QFont.Weight.DemiBold))
-        painter.drawText(QRectF(badge.right() + 10, pill.top(), pill.width() - 60, pill.height()),
+        painter.setFont(title_font)
+        text_left = badge.right() + 10
+        if not self.notice_detail:
+            painter.drawText(QRectF(text_left, pill.top(), pill.width() - 60, pill.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.message)
+            return
+        detail_font = self._font(9)
+        title_height = QFontMetrics(title_font).height()
+        detail_height = QFontMetrics(detail_font).height()
+        top = middle - (title_height + 2 + detail_height) / 2
+        painter.drawText(QRectF(text_left, top, pill.width() - 60, title_height),
                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.message)
+        painter.setPen(QColor(theme.muted))
+        painter.setFont(detail_font)
+        painter.drawText(QRectF(text_left, top + title_height + 2, pill.width() - 60, detail_height),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.notice_detail)
 
     def destroy_bubble(self) -> None:
         self.stop_animations()
@@ -584,17 +748,21 @@ class TrayApp:
         try:
             ensure_sounds()
             self.config = load_config()
-            self.config = dataclasses.replace(self.config, input_device=stable_input_selector(self.config.input_device))
+            self.config = dataclasses.replace(self.config, input_devices=normalize_input_devices(
+                stable_input_selector(selector) for selector in self.config.input_devices
+            ))
             self.bubble = StatusBubble(self.on_bubble_click)
             self.history = TranscriptionHistory(config_store.HISTORY_PATH)
             self.recordings = RecordingHistory(config_store.RECORDINGS_DIR)
             self.player = AudioPlayer(sd)
             self.bridge.status.connect(self.set_status)
             self.bridge.state.connect(self.set_engine_state)
+            self.bridge.input_selected.connect(self.bubble.set_input)
             self.bridge.recordings_changed.connect(self._refresh_history_view)
             self.engine = DictationEngine(
                 self.config, self.bridge.status.emit, self.bridge.state.emit, self.on_transcript,
                 self.recordings, self.bridge.recordings_changed.emit,
+                input_callback=self.bridge.input_selected.emit, refresh_inputs=self._reinitialize_portaudio,
             )
             self.bubble.audio_level_provider = self.engine.get_audio_level
             self.microphone_test: MicrophoneTest | None = None
@@ -637,6 +805,16 @@ class TrayApp:
             self.bubble.show_notice("Geen spraak gedetecteerd")
         elif state == "cleanup_skipped":
             self.bubble.show_notice("Niet opgeschoond")
+        elif state == "no_microphone":
+            self.bubble.show_notice(
+                "Geen microfoon gevonden", "Verbind je headset of sluit een microfoon aan. Klik hier voor Instellingen.",
+                glyph="mic-off", visible_ms=NO_MICROPHONE_VISIBLE_MS, opens_microphone_settings=True,
+            )
+        elif state == "microphone_unavailable":
+            self.bubble.show_notice(
+                "Microfoon kon niet worden geopend", "Klik hier om in Instellingen een andere te kiezen.",
+                glyph="mic-off", visible_ms=NO_MICROPHONE_VISIBLE_MS, opens_microphone_settings=True,
+            )
         else:
             if state == "recording":
                 self.player.stop()  # Never mix playback into a dictation.
@@ -654,7 +832,10 @@ class TrayApp:
         if state == "recording":
             self.engine.on_shortcut()
         elif state == "idle":
-            self.open_settings()
+            if self.bubble.opens_microphone_settings:
+                self.open_settings("dictate")
+            else:
+                self.open_settings()
 
     def on_tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -681,15 +862,19 @@ class TrayApp:
     def app_dir(self) -> str:
         return str(config_store.APP_DIR)
 
-    def _refresh_inputs_locked(self) -> None:
-        # PortAudio enumerates once at initialization. Reset it only while no
-        # dictation/test/playback stream owns it; callers hold both engine locks.
-        if self.engine.state != "idle":
-            raise RuntimeError("Stop eerst de opname of microfoontest voordat je apparaten vernieuwt.")
+    def _reinitialize_portaudio(self) -> None:
+        # PortAudio enumerates devices once, at initialization. Callers make
+        # sure no dictation or test stream owns it; playback is released here.
+        # The engine also calls this before every recording (about 40 ms).
         self.player.release()
         sd._terminate()
         sd._initialize()
-        self.engine._resolve_device(self.config)
+
+    def _refresh_inputs_locked(self) -> None:
+        # Callers hold both engine locks.
+        if self.engine.state != "idle":
+            raise RuntimeError("Stop eerst de opname of microfoontest voordat je apparaten vernieuwt.")
+        self._reinitialize_portaudio()
 
     def list_input_devices(self, *, refresh: bool = False) -> list[tuple[str, str]]:
         try:
@@ -726,7 +911,9 @@ class TrayApp:
             raise RuntimeError("Maak eerst een testopname.")
         if self.recording_busy():
             raise RuntimeError("Wacht tot de opname klaar is.")
-        return self.player.play(MICROPHONE_TEST_KEY, self.microphone_test.playback_path())
+        # Never open a stream while a starting dictation resets PortAudio.
+        with self.engine.stream_transition_lock:
+            return self.player.play(MICROPHONE_TEST_KEY, self.microphone_test.playback_path())
 
     def stop_microphone_test(self) -> None:
         if self.player.status().key == MICROPHONE_TEST_KEY:
@@ -746,10 +933,8 @@ class TrayApp:
 
     def apply_settings(self, new_config: Config) -> None:
         previous = self.config
-        if new_config.input_device != previous.input_device:
-            # Validate before writing, so a device that cannot be resolved is
-            # never stored while the user is told saving failed.
-            resolve_input_device(new_config.input_device)
+        # Microphones in the priority list may be disconnected; each recording
+        # uses the first one that is there.
         save_config(new_config)
         set_autostart(new_config.autostart)
         self.engine.update_config(new_config)
@@ -785,7 +970,9 @@ class TrayApp:
 
     def play_recording(self, recording_id: str, offset: float = 0.0) -> float:
         entry = self.recordings.get(recording_id)
-        return self.player.play(recording_id, self.recordings.audio_path(entry), offset)
+        # Never open a stream while a starting dictation resets PortAudio.
+        with self.engine.stream_transition_lock:
+            return self.player.play(recording_id, self.recordings.audio_path(entry), offset)
 
     def stop_playback(self) -> None:
         self.player.stop()

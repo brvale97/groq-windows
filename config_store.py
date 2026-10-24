@@ -20,7 +20,7 @@ import keyring
 from dictation_core import normalize_custom_words, normalize_word_replacements
 from text_cleanup import DEFAULT_CLEANUP_MODEL, normalize_cleanup_prompt
 
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.2.7.1"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
@@ -89,7 +89,9 @@ class Config:
     custom_words: tuple[str, ...] = ()
     word_replacements: tuple[tuple[str, str], ...] = ()
     shortcut: str = "insert"
-    input_device: str = ""
+    # Microphones in order of preference ("wasapi:<name>"). The Windows default
+    # input is always the last resort and is never stored in this list.
+    input_devices: tuple[str, ...] = ()
     sample_rate: int = 16_000
     channels: int = 1
     paste_after_transcription: bool = True
@@ -156,6 +158,32 @@ def stored_cleanup_prompt(value) -> str:
         return ""
 
 
+def normalize_input_devices(values) -> tuple[str, ...]:
+    devices: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in devices:
+            devices.append(value)
+    return tuple(devices)
+
+
+def stored_input_devices(data: dict, env: dict[str, str]) -> tuple[str, ...]:
+    """The priority list, migrated from the single microphone of 0.2.7 and older.
+
+    ``input_device`` keeps being written as the first priority, so an older
+    version (after a rollback) still uses the preferred microphone. If such a
+    version changed it, that choice moves to the top of the list.
+    """
+    legacy = data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", "")
+    legacy = legacy if isinstance(legacy, str) else str(legacy)
+    raw = data.get("input_devices")
+    if not isinstance(raw, (list, tuple)):
+        return normalize_input_devices([legacy])
+    devices = normalize_input_devices(raw)
+    if legacy and devices[:1] != (legacy,):
+        devices = (legacy, *(device for device in devices if device != legacy))
+    return devices
+
+
 def load_config() -> Config:
     data: dict = {}
     if SETTINGS_PATH.exists():
@@ -184,9 +212,7 @@ def load_config() -> Config:
         custom_words=normalize_custom_words(raw_custom_words, strict=False),
         word_replacements=normalize_word_replacements(raw_word_replacements, strict=False),
         shortcut=str(data.get("shortcut") or env.get("DICTATION_SHORTCUT") or "insert"),
-        input_device=str(
-            data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", "")
-        ),
+        input_devices=stored_input_devices(data, env),
         sample_rate=positive_int(data.get("sample_rate") or env.get("DICTATION_SAMPLE_RATE"), 16_000),
         channels=positive_int(data.get("channels") or env.get("DICTATION_CHANNELS"), 1),
         paste_after_transcription=bool(
@@ -216,7 +242,11 @@ def save_config(config: Config, *, allow_keyring_mutation: bool | None = None) -
     APP_DIR.mkdir(parents=True, exist_ok=True)
     if allow_keyring_mutation is None:
         allow_keyring_mutation = config.keyring_read_succeeded
-    data = asdict(config)
+    data = {}
+    for key, value in asdict(config).items():
+        if key == "input_devices":
+            data["input_device"] = value[0] if value else ""
+        data[key] = value
     api_key = data.pop("api_key", "")
     data.pop("keyring_read_succeeded", None)
     if allow_keyring_mutation:
