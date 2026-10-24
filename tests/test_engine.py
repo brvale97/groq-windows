@@ -233,6 +233,44 @@ class EngineTests(unittest.TestCase):
                 dictation._input_watchdog(stream)
             replace.assert_called_once_with(stream)
 
+    def test_watchdog_notices_a_microphone_that_windows_no_longer_lists(self) -> None:
+        events = []
+        dictation, stream = self.recording_engine(events)
+        stream.active = True
+        listed = ["Microfoon (TONOR TM310 shotgun ", "Headset Microphone (Soundcore M"]
+        lists = iter([listed] + [listed] * 4 + [listed[:1]])
+
+        def keep_audio_coming(_seconds):
+            dictation.last_audio_at = engine.time.monotonic()  # A driver that keeps sending silence.
+
+        with (
+            mock.patch.object(engine, "live_input_names", side_effect=lambda: next(lists)),
+            mock.patch.object(engine.time, "sleep", side_effect=keep_audio_coming),
+            mock.patch.object(dictation, "replace_lost_input") as replace,
+        ):
+            dictation._input_watchdog(stream)
+        replace.assert_called_once_with(stream)
+
+    def test_presence_is_only_checked_for_a_microphone_listed_at_the_start(self) -> None:
+        events = []
+        dictation, stream = self.recording_engine(events)
+        stream.active = True
+        ticks = []
+
+        def sleep(_seconds):
+            dictation.last_audio_at = engine.time.monotonic()
+            ticks.append(True)
+            if len(ticks) == 12:
+                dictation.state = "processing"
+
+        with (
+            mock.patch.object(engine, "live_input_names", return_value=["Andere naam in MME"]),
+            mock.patch.object(engine.time, "sleep", side_effect=sleep),
+            mock.patch.object(dictation, "replace_lost_input") as replace,
+        ):
+            dictation._input_watchdog(stream)
+        replace.assert_not_called()
+
     def test_watchdog_leaves_a_working_microphone_alone_and_ends_with_the_recording(self) -> None:
         events = []
         dictation, stream = self.recording_engine(events)

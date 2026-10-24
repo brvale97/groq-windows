@@ -65,6 +65,8 @@ AUDIO_LEVEL_TIMEOUT_SECONDS = 0.25
 # gone (a Bluetooth headset that dropped, a USB microphone pulled out).
 INPUT_STALL_SECONDS = 1.0
 INPUT_WATCH_INTERVAL_SECONDS = 0.2
+# Every this many watch ticks, also check that Windows still lists the microphone.
+INPUT_PRESENCE_EVERY_TICKS = 5
 # Dictaphone-style waveform: each tick adds one bar on the right and older bars
 # scroll left, so the last ~0.7 s of speech stays visible.
 WAVE_BAR_COUNT = 11
@@ -189,6 +191,43 @@ def default_input_name() -> str | None:
     except Exception as exc:
         logging.warning("Could not identify default input device: %s", exc)
         return None
+
+
+def live_input_names() -> list[str] | None:
+    """Microphones Windows lists right now, without resetting PortAudio.
+
+    The MME list (names cut to 31 characters) follows devices that come and
+    go, and reading it takes well under a millisecond. None off Windows or on
+    failure.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class WAVEINCAPSW(ctypes.Structure):
+            _fields_ = [
+                ("wMid", wintypes.WORD), ("wPid", wintypes.WORD), ("vDriverVersion", wintypes.UINT),
+                ("szPname", wintypes.WCHAR * 32), ("dwFormats", wintypes.DWORD),
+                ("wChannels", wintypes.WORD), ("wReserved1", wintypes.WORD),
+            ]
+
+        winmm = ctypes.WinDLL("winmm")
+        names = []
+        for index in range(winmm.waveInGetNumDevs()):
+            caps = WAVEINCAPSW()
+            if winmm.waveInGetDevCapsW(index, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+                names.append(caps.szPname)
+        return names
+    except Exception as exc:
+        logging.warning("Could not read the live microphone list: %s", exc)
+        return None
+
+
+def input_listed(name: str, names: list[str]) -> bool:
+    short = name[:31].strip()
+    return any(listed.strip() == short for listed in names)
 
 
 def input_devices() -> list[tuple[str, str]]:
@@ -472,18 +511,38 @@ class DictationEngine:
         threading.Thread(target=self._input_watchdog, args=(stream,), name="microphone-watch", daemon=True).start()
 
     def _input_watchdog(self, stream) -> None:
-        """Notice when the microphone in use disappears during the recording."""
+        """Notice when the microphone in use disappears during the recording.
+
+        Three signs: the stream stops, no audio arrives for a second, or
+        Windows no longer lists the microphone (some drivers keep delivering
+        silence). The last check only runs if the name was listed at the start.
+        """
+        name = self.active_input.name if self.active_input is not None else ""
+        names = live_input_names()
+        check_presence = bool(name) and names is not None and input_listed(name, names)
+        ticks = 0
         while True:
             time.sleep(INPUT_WATCH_INTERVAL_SECONDS)
             with self.lock:
                 if self.state != "recording" or self.stream is not stream:
                     return
+            ticks += 1
             try:
                 active = bool(stream.active)
             except Exception:
                 active = False
-            if active and time.monotonic() - self.last_audio_at < INPUT_STALL_SECONDS:
+            reason = ""
+            if not active:
+                reason = "stream gestopt"
+            elif time.monotonic() - self.last_audio_at >= INPUT_STALL_SECONDS:
+                reason = "geen audio meer"
+            elif check_presence and ticks % INPUT_PRESENCE_EVERY_TICKS == 0:
+                names = live_input_names()
+                if names is not None and not input_listed(name, names):
+                    reason = "niet meer in de Windows-lijst"
+            if not reason:
                 continue
+            logging.warning("Microfoon %s: %s.", name or "onbekend", reason)
             try:
                 self.replace_lost_input(stream)
             except Exception:
@@ -506,7 +565,7 @@ class DictationEngine:
                 selectors = self.active_selectors
                 self.stream = None
             lost_name = lost.name if lost is not None else ""
-            logging.warning("Microfoon %s geeft geen audio meer; overschakelen.", lost_name or "onbekend")
+            logging.warning("Overschakelen weg van %s.", lost_name or "onbekende microfoon")
             for action in (lost_stream.stop, lost_stream.close):
                 try:
                     action()
