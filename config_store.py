@@ -20,7 +20,7 @@ import keyring
 from dictation_core import normalize_custom_words, normalize_word_replacements
 from text_cleanup import DEFAULT_CLEANUP_MODEL, normalize_cleanup_prompt
 
-APP_VERSION = "0.2.7.2"
+APP_VERSION = "0.2.7.3"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
@@ -89,9 +89,9 @@ class Config:
     custom_words: tuple[str, ...] = ()
     word_replacements: tuple[tuple[str, str], ...] = ()
     shortcut: str = "insert"
-    # Microphones in order of preference ("wasapi:<name>"). The Windows default
-    # input is always the last resort and is never stored in this list.
-    input_devices: tuple[str, ...] = ()
+    # Microphones in order of preference: "wasapi:<name>", or "" for
+    # Windows-standaard (whatever Windows uses). Never empty.
+    input_devices: tuple[str, ...] = ("",)
     sample_rate: int = 16_000
     channels: int = 1
     paste_after_transcription: bool = True
@@ -159,11 +159,12 @@ def stored_cleanup_prompt(value) -> str:
 
 
 def normalize_input_devices(values) -> tuple[str, ...]:
+    """Unique selectors in order; an empty list becomes Windows-standaard."""
     devices: list[str] = []
     for value in values:
-        if isinstance(value, str) and value and value not in devices:
+        if isinstance(value, str) and value not in devices:
             devices.append(value)
-    return tuple(devices)
+    return tuple(devices) or ("",)
 
 
 def stored_input_devices(data: dict, env: dict[str, str]) -> tuple[str, ...]:
@@ -179,7 +180,7 @@ def stored_input_devices(data: dict, env: dict[str, str]) -> tuple[str, ...]:
     if not isinstance(raw, (list, tuple)):
         return normalize_input_devices([legacy])
     devices = normalize_input_devices(raw)
-    if legacy and devices[:1] != (legacy,):
+    if isinstance(data.get("input_device"), str) and devices[0] != legacy:
         devices = (legacy, *(device for device in devices if device != legacy))
     return devices
 

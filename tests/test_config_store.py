@@ -99,9 +99,13 @@ class ConfigStoreTests(unittest.TestCase):
         keys = list(stored)
         self.assertEqual(keys.index("input_devices"), keys.index("input_device") + 1)
 
-    def test_windows_default_of_0_2_7_becomes_an_empty_list(self) -> None:
+    def test_windows_default_of_0_2_7_becomes_the_windows_standaard_entry(self) -> None:
         _path, _text, loaded = self.load_settings({**self.LEGACY_0_2_7, "input_device": ""})
-        self.assertEqual(loaded.input_devices, ())
+        self.assertEqual(loaded.input_devices, ("",))
+        self.assertEqual(config_store.Config().input_devices, ("",))  # New installs too.
+        # The 0.2.7.1 test build stored an empty list for "follow Windows".
+        _path, _text, loaded = self.load_settings({"input_device": "", "input_devices": []})
+        self.assertEqual(loaded.input_devices, ("",))
 
     def test_a_microphone_chosen_in_an_older_version_moves_to_the_top(self) -> None:
         # After a rollback 0.2.7 only rewrites "input_device".
@@ -111,12 +115,15 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertEqual(loaded.input_devices, ("wasapi:B", "wasapi:A", "wasapi:C"))
         _path, _text, loaded = self.load_settings({"input_device": "wasapi:D", "input_devices": ["wasapi:A"]})
         self.assertEqual(loaded.input_devices, ("wasapi:D", "wasapi:A"))
+        # An older version that switched to Windows-standaard wrote "".
+        _path, _text, loaded = self.load_settings({"input_device": "", "input_devices": ["wasapi:A", ""]})
+        self.assertEqual(loaded.input_devices, ("", "wasapi:A"))
 
     def test_invalid_priority_entries_are_dropped(self) -> None:
         _path, _text, loaded = self.load_settings({
-            "input_device": "wasapi:A", "input_devices": ["wasapi:A", "", 3, None, "wasapi:A", "wasapi:B"],
+            "input_device": "wasapi:A", "input_devices": ["wasapi:A", "", 3, None, "wasapi:A", "wasapi:B", ""],
         })
-        self.assertEqual(loaded.input_devices, ("wasapi:A", "wasapi:B"))
+        self.assertEqual(loaded.input_devices, ("wasapi:A", "", "wasapi:B"))
 
     def test_legacy_settings_load_with_an_empty_dictionary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

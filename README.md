@@ -140,17 +140,25 @@ and changed "transcribt" to "transcribeert". A cleanup took 0.1-0.6 s
 (median 0.3 s). Bench scripts and results: `dist-release/v0.2.7/bench/`
 (not in Git).
 
-## Microphone priority (0.2.7.2 test)
+## Microphone priority (0.2.7.3 test)
 
 <!-- Source: Bram's request in T3, 2026-10-24 (priority 1, 2, 3; switch automatically and show it; show clearly when there is no microphone), his approval of the mockup ("Ja, bouw maar in, dat is perfect"), and the tests below. Scope: microphone choice and the status bubble. -->
 A friend had chosen a Bluetooth headset that was not connected; Alt+Z then
 seemed to do nothing, because the app only played the error sound and put a
 message in the tray tooltip. **Dicteren › Microfoons** is now a list in order of
-preference: each recording uses the first microphone that is connected.
-**Windows-standaard** is always the last resort and cannot be removed. Every row
-says **In gebruik**, **Beschikbaar** or **Niet verbonden**, with buttons to move
-it up or down or remove it. **Microfoon toevoegen** offers the microphones that
-are connected now; Windows only lists a Bluetooth headset while it is connected.
+preference: each recording uses the first microphone that is connected. Every
+row says **In gebruik**, **Beschikbaar** or **Niet verbonden**, with buttons to
+move it up or down or remove it; the last one cannot be removed.
+**Microfoon toevoegen** offers the microphones that are connected now (Windows
+only lists a Bluetooth headset while it is connected) and **Windows-standaard**,
+which follows the microphone set in Windows.
+
+<!-- Source: Bram in T3, 2026-10-24: "die vangnet optie moet nog weg. Dan moeten mensen gewoon instellen wat ze willen." -->
+There is no hidden safety net: Windows-standaard is used only if it is in the
+list, at its place. New installs and a previous "Windows-standaard" choice
+start with just that entry; a previously chosen microphone becomes the only
+entry.
+
 **Microfoon testen** tests the microphone the next recording would use. It
 records until you click **Stop test** (at most 10 seconds) and keeps what you
 said for **Terugluisteren**; before 0.2.7.2 it always took 5 seconds.
@@ -160,25 +168,31 @@ The app reads the Windows audio devices again at every shortcut press
 or disconnected since the previous recording counts. A listed microphone that
 cannot be opened is skipped too.
 
-<!-- Source: Bram in T3, 2026-10-24: "ik wil dat die fallback ook werkt als TIJDENS het recorden de verbinding wegvalt". -->
-If the microphone disappears during a recording (its stream stops, or no audio
-arrives for 1 second), the app switches to the next microphone of the list and
-the same recording continues; what was said during the switch (about a second)
-is missing. A microphone lost this way is not used again in that recording. If
-none is left, the recording stops and what was captured is transcribed.
+<!-- Source: Bram in T3, 2026-10-24: "ik wil dat die fallback ook werkt als TIJDENS het recorden de verbinding wegvalt" and "als de eerste mic weer terugkomt moet die daar ook weer fallback naar doen". -->
+During a recording the app keeps watching. If the microphone disappears (its
+stream stops, no audio arrives for 1 second, or Windows no longer lists it), the
+same recording continues on the next microphone of the list; what was said
+during the switch (about a second) is missing. If a higher priority comes back
+(Windows lists it again for about two seconds), the recording switches back to
+it, missing a split second. A microphone that Windows listed but that could not
+be used at the start is not retried; one that does not open when it comes back
+is retried twice, 10 seconds apart. The live list comes from Windows Core Audio
+and takes about a millisecond. If no microphone is left, the recording stops
+and what was captured is transcribed.
 
 If the recording does not use priority 1, a card above the bubble says
 **Overgeschakeld naar …** and which microphones were not connected (or
-**Verbinding met … verbroken** after a switch during the recording) for 3 seconds;
-an amber number (or the Windows logo for Windows-standaard) stays in the bubble
-until the recording ends. Without any microphone nothing is recorded: the error
-sound plays and a red card **Geen microfoon gevonden** stays for 6 seconds;
-clicking it opens Settings at the microphones.
+**Verbinding met … verbroken** after a switch during the recording) for 3
+seconds, and an amber number stays in the bubble until the recording ends or
+priority 1 is back; switching back shows a green card **Terug naar …**. Without
+any working microphone in the list nothing is recorded: the error sound plays
+and a red card **Geen microfoon gevonden** stays for 6 seconds; clicking it
+opens Settings at the microphones.
 
-The previous single microphone becomes priority 1. `settings.json` keeps
-`input_device` as the first priority next to the new `input_devices` list, so an
-older version (after a rollback) still uses the preferred microphone; a
-microphone chosen in such a version moves to the top of the list.
+`settings.json` keeps `input_device` as the first entry ("" for
+Windows-standaard) next to the `input_devices` list, so an older version (after
+a rollback) still uses the preferred microphone; a microphone chosen in such a
+version moves to the top of the list.
 
 ## Updates
 

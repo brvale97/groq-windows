@@ -67,6 +67,11 @@ INPUT_STALL_SECONDS = 1.0
 INPUT_WATCH_INTERVAL_SECONDS = 0.2
 # Every this many watch ticks, also check that Windows still lists the microphone.
 INPUT_PRESENCE_EVERY_TICKS = 5
+# A higher priority must be listed this many checks in a row before switching
+# back to it; if it then does not open, wait this long before trying again.
+INPUT_RETURN_CHECKS = 2
+INPUT_RETURN_RETRY_SECONDS = 10.0
+INPUT_RETURN_ATTEMPTS = 3
 # Dictaphone-style waveform: each tick adds one bar on the right and older bars
 # scroll left, so the last ~0.7 s of speech stays visible.
 WAVE_BAR_COUNT = 11
@@ -194,40 +199,81 @@ def default_input_name() -> str | None:
 
 
 def live_input_names() -> list[str] | None:
-    """Microphones Windows lists right now, without resetting PortAudio.
+    """Names of the microphones Windows has active right now (Core Audio).
 
-    The MME list (names cut to 31 characters) follows devices that come and
-    go, and reading it takes well under a millisecond. None off Windows or on
-    failure.
+    PortAudio only sees devices from its last initialization; this asks
+    Windows directly, takes about a millisecond and does not touch any
+    stream. None off Windows or on failure.
     """
     if os.name != "nt":
         return None
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        class WAVEINCAPSW(ctypes.Structure):
-            _fields_ = [
-                ("wMid", wintypes.WORD), ("wPid", wintypes.WORD), ("vDriverVersion", wintypes.UINT),
-                ("szPname", wintypes.WCHAR * 32), ("dwFormats", wintypes.DWORD),
-                ("wChannels", wintypes.WORD), ("wReserved1", wintypes.WORD),
-            ]
-
-        winmm = ctypes.WinDLL("winmm")
-        names = []
-        for index in range(winmm.waveInGetNumDevs()):
-            caps = WAVEINCAPSW()
-            if winmm.waveInGetDevCapsW(index, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
-                names.append(caps.szPname)
-        return names
+        with windows_audio_thread():
+            return _core_audio_capture_names()
     except Exception as exc:
         logging.warning("Could not read the live microphone list: %s", exc)
         return None
 
 
-def input_listed(name: str, names: list[str]) -> bool:
-    short = name[:31].strip()
-    return any(listed.strip() == short for listed in names)
+def _core_audio_capture_names() -> list[str]:
+    import ctypes
+    from ctypes import HRESULT, POINTER, byref, c_void_p, wintypes
+
+    ole = ctypes.oledll.ole32
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort), ("Data3", ctypes.c_ushort),
+                    ("Data4", ctypes.c_ubyte * 8)]
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            ole.CLSIDFromString(text, byref(self))
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", wintypes.DWORD)]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("reserved1", ctypes.c_ushort), ("reserved2", ctypes.c_ushort),
+                    ("reserved3", ctypes.c_ushort), ("value", ctypes.c_wchar_p), ("padding", ctypes.c_void_p)]
+
+    def method(obj, index, *argtypes):
+        vtable = ctypes.cast(obj, POINTER(POINTER(c_void_p))).contents
+        return ctypes.WINFUNCTYPE(HRESULT, c_void_p, *argtypes)(vtable[index])
+
+    def release(obj) -> None:
+        if obj:
+            vtable = ctypes.cast(obj, POINTER(POINTER(c_void_p))).contents
+            ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(vtable[2])(obj)
+
+    E_CAPTURE, DEVICE_STATE_ACTIVE, CLSCTX_INPROC_SERVER, VT_LPWSTR = 1, 1, 1, 31
+    friendly_name = PROPERTYKEY(GUID("{A45C254E-DF1C-4EFD-8020-67D146A850E0}"), 14)
+    enumerator, collection = c_void_p(), c_void_p()
+    names: list[str] = []
+    try:
+        ole.CoCreateInstance(byref(GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")), None, CLSCTX_INPROC_SERVER,
+                             byref(GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")), byref(enumerator))
+        # IMMDeviceEnumerator::EnumAudioEndpoints
+        method(enumerator, 3, ctypes.c_int, wintypes.DWORD, POINTER(c_void_p))(
+            enumerator, E_CAPTURE, DEVICE_STATE_ACTIVE, byref(collection))
+        count = wintypes.UINT()
+        method(collection, 3, POINTER(wintypes.UINT))(collection, byref(count))  # GetCount
+        for index in range(count.value):
+            device, store = c_void_p(), c_void_p()
+            try:
+                method(collection, 4, wintypes.UINT, POINTER(c_void_p))(collection, index, byref(device))  # Item
+                method(device, 4, wintypes.DWORD, POINTER(c_void_p))(device, 0, byref(store))  # OpenPropertyStore
+                value = PROPVARIANT()
+                method(store, 5, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))(store, byref(friendly_name), byref(value))
+                if value.vt == VT_LPWSTR and value.value:
+                    names.append(value.value)
+                ole.PropVariantClear(byref(value))
+            finally:
+                release(store)
+                release(device)
+    finally:
+        release(collection)
+        release(enumerator)
+    return names
 
 
 def input_devices() -> list[tuple[str, str]]:
@@ -312,15 +358,19 @@ class InputChoice:
 
     device: int | None
     name: str
-    # Place in the priority list; 0 is the Windows default after the list.
+    # Place in the priority list, starting at 1.
     priority: int
     wasapi: bool = False
     skipped: tuple[str, ...] = ()
     # True when every skipped microphone was missing, False when one was
     # present but could not be opened.
     skipped_missing: bool = True
-    # The microphone this recording lost when it switched to this one.
+    # During a recording: the microphone it lost when it switched to this one,
+    # or whether it switched back because a higher priority returned.
     lost: str = ""
+    returned: bool = False
+    # The list entry "Windows-standaard": whatever Windows uses.
+    windows_default: bool = False
 
     @property
     def fallback(self) -> bool:
@@ -390,8 +440,11 @@ class DictationEngine:
         self.active_session: RecordingSession | None = None
         self.active_input: InputChoice | None = None
         self.active_selectors: tuple[str, ...] = ()
-        # Microphones lost during the current recording; never reopened in it.
+        # Microphones lost during the current recording; reopened only once
+        # Windows lists them again.
         self.lost_inputs: set[str] = set()
+        self.return_retry_after: dict[str, float] = {}
+        self.return_attempts: dict[str, int] = {}
         self.last_audio_at = 0.0
         self.state = "idle"
         self.lock = threading.Lock()
@@ -478,11 +531,13 @@ class DictationEngine:
             self.audio_warning = None
             self.audio_level_reading = (0.0, 0.0)
             self.audio_level_peak = 0.0
-            self.active_selectors = config.input_devices
+            self.active_selectors = config.input_devices or ("",)
             self.lost_inputs = set()
+            self.return_retry_after = {}
+            self.return_attempts = {}
 
         try:
-            stream, choice = self._open_input(config.input_devices, session)
+            stream, choice = self._open_input(self.active_selectors, session)
         except Exception as exc:
             with self.lock:
                 self.state = "idle"
@@ -511,15 +566,27 @@ class DictationEngine:
         threading.Thread(target=self._input_watchdog, args=(stream,), name="microphone-watch", daemon=True).start()
 
     def _input_watchdog(self, stream) -> None:
-        """Notice when the microphone in use disappears during the recording.
+        """Follow the microphones during the recording.
 
-        Three signs: the stream stops, no audio arrives for a second, or
-        Windows no longer lists the microphone (some drivers keep delivering
-        silence). The last check only runs if the name was listed at the start.
+        The microphone in use counts as lost when its stream stops, no audio
+        arrives for a second, or Windows no longer lists it (some drivers keep
+        delivering silence; only checked if it was listed at the start). A
+        higher priority that Windows lists again for two checks in a row (about
+        two seconds) takes over again.
         """
-        name = self.active_input.name if self.active_input is not None else ""
+        choice = self.active_input
+        name = choice.name if choice is not None else ""
+        priority = choice.priority if choice is not None else 1
         names = live_input_names()
-        check_presence = bool(name) and names is not None and input_listed(name, names)
+        check_presence = bool(name) and names is not None and name in names
+        # Only a higher priority that comes back counts: one that was listed
+        # but not usable when this stream started is not retried, except
+        # after a failed switch back (a headset still connecting).
+        baseline = set(names or ())
+        better = [selector.removeprefix("wasapi:") for selector in self.active_selectors[:priority - 1]
+                  if selector.startswith("wasapi:")]
+        better = [b for b in better if b not in baseline or b in self.return_retry_after]
+        seen_back: dict[str, int] = {}
         ticks = 0
         while True:
             time.sleep(INPUT_WATCH_INTERVAL_SECONDS)
@@ -531,48 +598,60 @@ class DictationEngine:
                 active = bool(stream.active)
             except Exception:
                 active = False
-            reason = ""
+            reason, returned = "", ""
             if not active:
                 reason = "stream gestopt"
             elif time.monotonic() - self.last_audio_at >= INPUT_STALL_SECONDS:
                 reason = "geen audio meer"
-            elif check_presence and ticks % INPUT_PRESENCE_EVERY_TICKS == 0:
+            elif (check_presence or better) and ticks % INPUT_PRESENCE_EVERY_TICKS == 0:
                 names = live_input_names()
-                if names is not None and not input_listed(name, names):
-                    reason = "niet meer in de Windows-lijst"
-            if not reason:
+                if names is not None:
+                    if check_presence and name not in names:
+                        reason = "niet meer in de Windows-lijst"
+                    else:
+                        now = time.monotonic()
+                        listed = [b for b in better if b in names and now >= self.return_retry_after.get(b, 0.0)]
+                        seen_back = {b: seen_back.get(b, 0) + 1 for b in listed}
+                        returned = next((b for b in listed if seen_back[b] >= INPUT_RETURN_CHECKS), "")
+            if not reason and not returned:
                 continue
-            logging.warning("Microfoon %s: %s.", name or "onbekend", reason)
+            if reason:
+                logging.warning("Microfoon %s: %s.", name or "onbekend", reason)
+            else:
+                logging.info("Microfoon %s is terug; terugschakelen.", returned)
             try:
-                self.replace_lost_input(stream)
+                self.switch_input(stream, lost=bool(reason), returned=returned)
             except Exception:
                 logging.exception("Could not switch microphones during the recording")
             return
 
-    def replace_lost_input(self, lost_stream) -> None:
-        """Continue the same recording on the next microphone of the priority list.
+    def switch_input(self, old_stream, *, lost: bool, returned: str = "") -> None:
+        """Continue the same recording on another microphone of the priority list.
 
-        Audio recorded so far stays; only what was said while switching (about
-        a second) is missing. Without any microphone left, the recording stops
-        and what was captured is transcribed as usual.
+        After a loss it takes the next one that works; when a higher priority
+        is back it takes that one. Audio recorded so far stays; only what was
+        said while switching is missing (about a second after a loss, a split
+        second when switching back). Without any microphone left, the
+        recording stops and what was captured is transcribed as usual.
         """
         with self.stream_transition_lock, windows_audio_thread():
             with self.lock:
-                if self.state != "recording" or self.stream is not lost_stream:
+                if self.state != "recording" or self.stream is not old_stream:
                     return
                 session = self.active_session
-                lost = self.active_input
+                previous = self.active_input
                 selectors = self.active_selectors
                 self.stream = None
-            lost_name = lost.name if lost is not None else ""
-            logging.warning("Overschakelen weg van %s.", lost_name or "onbekende microfoon")
-            for action in (lost_stream.stop, lost_stream.close):
+            previous_name = previous.name if previous is not None else ""
+            for action in (old_stream.stop, old_stream.close):
                 try:
                     action()
                 except Exception as exc:
-                    logging.info("Lost input stream: %s", exc)
-            if lost_name:
-                self.lost_inputs.add(lost_name)
+                    logging.info("Old input stream: %s", exc)
+            if lost and previous_name:
+                self.lost_inputs.add(previous_name)
+            if returned:
+                self.lost_inputs.discard(returned)
             try:
                 stream, choice = self._open_input(selectors, session, exclude=frozenset(self.lost_inputs))
             except NoMicrophoneError:
@@ -580,20 +659,36 @@ class DictationEngine:
                 self.notify("Microfoon weggevallen. De opname tot dat moment wordt verwerkt.")
                 self._stop_recording()
                 return
-            choice = dataclasses.replace(choice, lost=lost_name)
+            changed = choice.name != previous_name
+            if lost:
+                choice = dataclasses.replace(choice, lost=previous_name)
+            elif changed:
+                choice = dataclasses.replace(choice, returned=True)
+            elif returned:
+                # Listed again but not usable yet (a headset still connecting): retry a few times.
+                attempts = self.return_attempts.get(returned, 0) + 1
+                self.return_attempts[returned] = attempts
+                self.return_retry_after[returned] = (
+                    time.monotonic() + INPUT_RETURN_RETRY_SECONDS if attempts < INPUT_RETURN_ATTEMPTS else math.inf
+                )
+            if choice.returned:
+                self.return_retry_after.pop(choice.name, None)
             with self.lock:
                 self.stream = stream
                 self.active_input = choice
                 self.last_audio_at = time.monotonic()
-        self.input_callback(choice)
-        self.notify(f"Overgeschakeld naar {choice.name}; de opname loopt door.")
+        if lost or changed:
+            self.input_callback(choice)
+            verb = "Terug naar" if choice.returned else "Overgeschakeld naar"
+            self.notify(f"{verb} {choice.name}; de opname loopt door.")
         self._watch_input(stream)
 
     def _open_input(
         self, selectors: tuple[str, ...], session: RecordingSession, exclude: frozenset[str] = frozenset(),
     ) -> tuple[sd.InputStream, InputChoice]:
-        """Open the first microphone of the priority list that works, else the Windows default.
+        """Open the first microphone of the priority list that works.
 
+        "" in the list is Windows-standaard: whatever microphone Windows uses.
         PortAudio lists devices only when it initializes, so the list is read
         again first: a headset that connected or disconnected since the last
         recording counts. Microphones named in ``exclude`` (lost during this
@@ -605,17 +700,27 @@ class DictationEngine:
             logging.exception("Could not refresh the microphone list")
         skipped: list[str] = []
         skipped_missing = True
-        for priority, selector in enumerate(selectors, start=1):
-            name = selector.removeprefix("wasapi:")
+        for priority, selector in enumerate(selectors or ("",), start=1):
+            if selector:
+                name = selector.removeprefix("wasapi:")
+            else:
+                name = default_input_name() or ""
+                if not name:
+                    logging.info("Microfoon %d overgeslagen: Windows heeft geen standaardmicrofoon.", priority)
+                    skipped.append(DEFAULT_DEVICE_LABEL)
+                    continue
             if name in exclude:
                 skipped.append(name)
                 continue
-            try:
-                device = resolve_input_device(selector)
-            except Exception as exc:
-                logging.info("Microfoon %d overgeslagen: %s", priority, exc)
-                skipped.append(name)
-                continue
+            if selector:
+                try:
+                    device = resolve_input_device(selector)
+                except Exception as exc:
+                    logging.info("Microfoon %d overgeslagen: %s", priority, exc)
+                    skipped.append(name)
+                    continue
+            else:
+                device = None  # PortAudio's default input follows Windows.
             wasapi = selector.startswith("wasapi:")
             try:
                 stream = self._open_stream(session, device, wasapi=wasapi)
@@ -624,26 +729,19 @@ class DictationEngine:
                 skipped.append(name)
                 skipped_missing = False
                 continue
-            if not wasapi:
+            if selector and not wasapi:
                 try:
                     name = sd.query_devices(device)["name"]
                 except Exception:
                     pass
-            choice = InputChoice(device, name, priority, wasapi, tuple(skipped), skipped_missing)
+            choice = InputChoice(device, name, priority, wasapi, tuple(skipped), skipped_missing,
+                                 windows_default=not selector)
             break
         else:
-            default_name = default_input_name()
-            if default_name and default_name in exclude:
-                raise NoMicrophoneError(found=False)
-            try:
-                stream = self._open_stream(session, None, wasapi=False)
-            except Exception as exc:
-                logging.warning("Windows-standaardmicrofoon kon niet worden geopend: %s", exc)
-                raise NoMicrophoneError(found=bool(default_name) or not skipped_missing) from exc
-            choice = InputChoice(None, default_name or "", 0, False, tuple(skipped), skipped_missing)
+            raise NoMicrophoneError(found=not skipped_missing)
         logging.info(
-            "Opname met %s (%s)%s", choice.name or "onbekende microfoon",
-            f"prioriteit {choice.priority}" if choice.priority else "Windows-standaard",
+            "Opname met %s (prioriteit %d%s)%s", choice.name, choice.priority,
+            ", Windows-standaard" if choice.windows_default else "",
             f"; niet beschikbaar: {', '.join(choice.skipped)}" if choice.skipped else "",
         )
         return stream, choice

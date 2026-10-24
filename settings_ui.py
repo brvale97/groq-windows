@@ -567,8 +567,8 @@ class SettingsWindow(QWidget):
         self.microphone_test_used = False
         self.microphone_test_name = ""
         self._loading = True
-        # Microphones in order of preference; Windows-standaard is the implicit last one.
-        self.device_priority: list[str] = list(config.input_devices)
+        # Microphones in order of preference; "" is Windows-standaard.
+        self.device_priority: list[str] = list(config.input_devices) or [""]
         self.device_labels: dict[str, str] = {}
         self.default_device_name: str | None = None
         self.custom_words: list[str] = list(config.custom_words)
@@ -763,7 +763,6 @@ class SettingsWindow(QWidget):
         self.device_list_layout.setSpacing(0)
         mic_card.body.addWidget(self.device_list)
         self.device_rows: list[QFrame] = []
-        self.windows_row: QFrame | None = None
         self.add_device_button = button("Microfoon toevoegen", glyph="plus")
         self.add_device_menu = QMenu(self.add_device_button)
         self.add_device_menu.aboutToShow.connect(self._prepare_add_device_menu)
@@ -1321,14 +1320,16 @@ class SettingsWindow(QWidget):
         self._render_devices()
 
     def device_name(self, selector: str) -> str:
+        if not selector:
+            return DEFAULT_DEVICE_LABEL
         return self.device_labels.get(selector) or selector.removeprefix("wasapi:")
 
+    def device_available(self, selector: str) -> bool:
+        return bool(self.default_device_name) if not selector else selector in self.device_labels
+
     def active_device_id(self) -> str | None:
-        """What the next recording would use: a list entry, "" for Windows-standaard, None for nothing."""
-        for selector in self.device_priority:
-            if selector in self.device_labels:
-                return selector
-        return "" if self.default_device_name else None
+        """The list entry the next recording would use ("" is Windows-standaard), or None."""
+        return next((selector for selector in self.device_priority if self.device_available(selector)), None)
 
     def _render_devices(self) -> None:
         self._clear_layout(self.device_list_layout)
@@ -1336,43 +1337,39 @@ class SettingsWindow(QWidget):
         active = self.active_device_id()
         editable = not self.microphone_test_active
         for index, selector in enumerate(self.device_priority):
-            connected = selector in self.device_labels
+            available = self.device_available(selector)
             if selector == active:
                 status = ("In gebruik", "active")
-            elif connected:
+            elif available:
                 status = ("Beschikbaar", "")
             else:
                 status = ("Niet verbonden", "danger")
-            row = self._device_row(str(index + 1), self.device_name(selector), "", status, first=index == 0)
-            row.setProperty("missing", "false" if connected else "true")
+            detail = ""
+            if not selector:
+                detail = (f"Volgt Windows · nu: {self.default_device_name}" if self.default_device_name
+                          else "Volgt Windows · nu: geen microfoon")
+            row = self._device_row(str(index + 1), self.device_name(selector), detail, status, first=index == 0)
+            row.setProperty("missing", "false" if available else "true")
             row.up_button = icon_button("chevron-up", "Omhoog")
             row.up_button.setEnabled(editable and index > 0)
             row.up_button.clicked.connect(lambda _checked=False, i=index: self.move_device(i, -1))
             row.down_button = icon_button("chevron-down", "Omlaag")
             row.down_button.setEnabled(editable and index < len(self.device_priority) - 1)
             row.down_button.clicked.connect(lambda _checked=False, i=index: self.move_device(i, 1))
-            row.remove_button = icon_button("close", "Verwijderen")
-            row.remove_button.setEnabled(editable)
+            # The list is never empty: the app needs at least one microphone to try.
+            last = len(self.device_priority) == 1
+            row.remove_button = icon_button(
+                "close", "Er moet minstens één microfoon in de lijst staan" if last else "Verwijderen",
+            )
+            row.remove_button.setEnabled(editable and not last)
             row.remove_button.clicked.connect(lambda _checked=False, i=index: self.remove_device(i))
             for widget in (row.up_button, row.down_button, row.remove_button):
                 row.layout().addWidget(widget)
             self.device_list_layout.addWidget(row)
             self.device_rows.append(row)
-        if active == "":
-            status = ("In gebruik", "active")
-        elif self.default_device_name:
-            status = ("Vangnet", "muted")
-        else:
-            status = ("Niet verbonden", "danger")
-        current = f"Nu: {self.default_device_name}" if self.default_device_name else "Nu: geen microfoon"
-        self.windows_row = self._device_row(
-            None, DEFAULT_DEVICE_LABEL, f"{current} · altijd als laatste", status, first=not self.device_priority,
-        )
-        self.windows_row.setProperty("fixed", "true")
-        self.device_list_layout.addWidget(self.windows_row)
         self._update_device_note(active)
 
-    def _device_row(self, number: str | None, name: str, detail: str, status: tuple[str, str], *, first: bool) -> QFrame:
+    def _device_row(self, number: str, name: str, detail: str, status: tuple[str, str], *, first: bool) -> QFrame:
         row = QFrame()
         row.setObjectName("micRow")
         row.setProperty("first", "true" if first else "false")
@@ -1381,12 +1378,10 @@ class SettingsWindow(QWidget):
         # The active row has a 3 px accent bar on the left; keep the numbers aligned.
         layout.setContentsMargins(9 if status[1] == "active" else 12, 7, 10, 7)
         layout.setSpacing(8)
-        marker = QLabel(number or "")
+        marker = QLabel(number)
         marker.setObjectName("micNumber")
         marker.setFixedSize(24, 24)
         marker.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if number is None:
-            marker.setPixmap(icon("lock", "muted").pixmap(QSize(13, 13)))
         layout.addWidget(marker)
         text = QVBoxLayout()
         text.setSpacing(0)
@@ -1405,20 +1400,19 @@ class SettingsWindow(QWidget):
     def _update_device_note(self, active: str | None) -> None:
         if active is None:
             text, tone = (
-                "<b>Geen microfoon gevonden.</b> Verbind je headset of sluit een microfoon aan en klik op Vernieuwen.",
+                "<b>Geen microfoon gevonden.</b> Verbind je headset of sluit een microfoon aan en klik op Vernieuwen, "
+                "of voeg een andere microfoon toe.",
                 "danger",
             )
         else:
-            position = self.device_priority.index(active) if active else len(self.device_priority)
+            position = self.device_priority.index(active)
             skipped = [short_device_name(self.device_name(selector)) for selector in self.device_priority[:position]]
             if not skipped:
                 self.device_note.hide()
                 return
-            used = (
-                f"prioriteit {position + 1}: {short_device_name(self.device_name(active))}" if active
-                else f"{DEFAULT_DEVICE_LABEL} ({short_device_name(self.default_device_name or '')})"
-            )
-            text = f"<b>{html.escape(unavailable_microphones_text(skipped))}.</b> De app gebruikt nu {html.escape(used)}."
+            name = short_device_name(self.device_name(active) if active else self.default_device_name or "")
+            text = (f"<b>{html.escape(unavailable_microphones_text(skipped))}.</b> "
+                    f"De app gebruikt nu prioriteit {position + 1}: {html.escape(name)}.")
             tone = "warning"
         self.device_note.setText(text)
         self.device_note.setProperty("tone", tone)
@@ -1426,7 +1420,10 @@ class SettingsWindow(QWidget):
         self.device_note.show()
 
     def addable_devices(self) -> list[tuple[str, str]]:
-        return [(device_id, text) for device_id, text in self.device_labels.items() if device_id not in self.device_priority]
+        options = [(device_id, text) for device_id, text in self.device_labels.items() if device_id not in self.device_priority]
+        if "" not in self.device_priority:
+            options.append(("", f"{DEFAULT_DEVICE_LABEL} (volgt de microfoon die in Windows is ingesteld)"))
+        return options
 
     def _prepare_add_device_menu(self) -> None:
         # A headset that was just connected should be offered right away.
@@ -1443,7 +1440,7 @@ class SettingsWindow(QWidget):
         menu.addAction("Headset niet in de lijst? Verbind hem eerst; Windows toont alleen verbonden microfoons.").setEnabled(False)
 
     def add_device(self, selector: str) -> None:
-        if selector and selector not in self.device_priority:
+        if selector not in self.device_priority:
             self.device_priority.append(selector)
             self._priority_changed()
 
@@ -1455,7 +1452,7 @@ class SettingsWindow(QWidget):
             self._priority_changed()
 
     def remove_device(self, index: int) -> None:
-        if 0 <= index < len(self.device_priority):
+        if 0 <= index < len(self.device_priority) and len(self.device_priority) > 1:
             del self.device_priority[index]
             self._priority_changed()
 
@@ -1496,7 +1493,8 @@ class SettingsWindow(QWidget):
         if selector is None:
             self.microphone_result_label.setText("Geen microfoon gevonden. Verbind je headset of sluit een microfoon aan.")
             return
-        self.microphone_test_name = short_device_name(self.device_name(selector) if selector else self.default_device_name or "")
+        name = self.device_name(selector) if selector else self.default_device_name or ""
+        self.microphone_test_name = short_device_name(name)
         try:
             self.controller.start_microphone_test(selector)
         except Exception as exc:

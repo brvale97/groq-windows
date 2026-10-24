@@ -200,8 +200,8 @@ class StatusBubbleTests(unittest.TestCase):
         self.assertEqual(self.clicks, [True])
 
     def fallback(self, priority=2, name="Microfoon (Rode NT-USB Mini)",
-                 skipped=("Headset Microphone (Soundcore Motion Boom)",), missing=True):
-        return app.InputChoice(None, name, priority, False, skipped, missing)
+                 skipped=("Headset Microphone (Soundcore Motion Boom)",), missing=True, windows_default=False):
+        return app.InputChoice(None, name, priority, False, skipped, missing, windows_default=windows_default)
 
     def test_switching_microphones_shows_a_card_and_keeps_a_badge(self):
         from PySide6.QtTest import QTest
@@ -253,26 +253,39 @@ class StatusBubbleTests(unittest.TestCase):
         self.bubble.wave_tick()
         self.assertEqual(self.bubble.badge_width(), app.RECORDING_BADGE_WIDTH)
         self.bubble.grab()
-        # The Windows default replacing a lost default microphone still counts as a switch.
-        self.bubble.set_input(app.InputChoice(None, "Microfoonmatrix (Realtek(R) Audio)", 0, lost="Microfoon (TONOR TM310 shotgun Mic)"))
+        # Windows-standaard taking over after a loss says so.
+        self.bubble.set_input(app.InputChoice(None, "Microfoonmatrix (Realtek(R) Audio)", 2,
+                                              lost="Microfoon (TONOR TM310 shotgun Mic)", windows_default=True))
         self.assertEqual(self.bubble.input_notice_texts()[1], "Verbinding met TONOR TM310 shotgun Mic verbroken · Windows-standaard")
+
+    def test_switching_back_to_priority_one_shows_a_card_without_badge(self):
+        self.bubble.set_input(self.fallback())
+        self.bubble.set_state("recording")
+        self.bubble.hide_input_notice()
+        back = app.InputChoice(3, "Headset Microphone (Soundcore Motion Boom)", 1, True, returned=True)
+        self.bubble.set_input(back)
+        self.assertTrue(self.bubble.input_notice_visible)
+        self.assertEqual(self.bubble.input_notice_texts(), ("Terug naar Soundcore Motion Boom", "Weer verbonden"))
+        self.bubble.wave_tick()
+        self.assertEqual(self.bubble.badge_width(), 0)  # Priority 1 again: no amber number.
+        self.bubble.grab()
 
     def test_the_first_priority_needs_no_card(self):
         self.bubble.set_input(app.InputChoice(3, "Microfoon (Rode NT-USB Mini)", 1, True))
         self.bubble.set_state("recording")
         self.assertFalse(self.bubble.input_notice_visible)
-        self.assertIsNone(self.bubble.input_choice)
+        self.assertEqual(self.bubble.badge_width(), 0)
         self.assertEqual(self.bubble.height(), 48 + 2 * app.BUBBLE_MARGIN)
 
     def test_card_texts_for_the_windows_default_and_several_missing_microphones(self):
-        self.bubble.set_input(self.fallback(0, "Microfoonmatrix (Realtek(R) Audio)", (
+        self.bubble.set_input(self.fallback(3, "Microfoonmatrix (Realtek(R) Audio)", (
             "Headset Microphone (Soundcore Motion Boom)", "Microfoon (Rode NT-USB Mini)",
-        )))
+        ), windows_default=True))
         self.assertEqual(self.bubble.input_notice_texts(), (
             "Overgeschakeld naar Realtek(R) Audio",
             "Soundcore Motion Boom en Rode NT-USB Mini niet verbonden · Windows-standaard",
         ))
-        self.bubble.set_input(self.fallback(0, "", ("Headset Microphone (Soundcore Motion Boom)",)))
+        self.bubble.set_input(self.fallback(2, "", ("Headset Microphone (Soundcore Motion Boom)",), windows_default=True))
         self.assertEqual(self.bubble.input_notice_texts(),
                          ("Overgeschakeld naar Windows-standaard", "Soundcore Motion Boom niet verbonden"))
         self.bubble.set_input(self.fallback(4, skipped=("A", "B", "C"), missing=False))

@@ -209,7 +209,7 @@ class SettingsWindowTests(unittest.TestCase):
 
     @staticmethod
     def statuses(window):
-        return [row.status_badge.text() for row in window.device_rows] + [window.windows_row.status_badge.text()]
+        return [row.status_badge.text() for row in window.device_rows]
 
     def test_priority_list_shows_which_microphone_is_used_and_why(self):
         _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.SOUNDCORE, self.RODE)))
@@ -217,10 +217,10 @@ class SettingsWindowTests(unittest.TestCase):
         window.refresh_devices()
         self.assertEqual([row.name_label.text() for row in window.device_rows],
                          ["Headset Microphone (Soundcore Motion Boom)", "Microfoon (Rode NT-USB Mini)"])
-        self.assertEqual(self.statuses(window), ["Niet verbonden", "In gebruik", "Vangnet"])
+        self.assertEqual(self.statuses(window), ["Niet verbonden", "In gebruik"])
+        self.assertFalse(hasattr(window, "windows_row"))  # No fixed safety net any more.
         self.assertEqual(window.device_rows[0].property("missing"), "true")
         self.assertEqual(window.device_rows[1].property("active"), "true")
-        self.assertIn("Nu: Microfoonmatrix (Realtek(R) Audio)", window.windows_row.detail_label.text())
         self.assertTrue(window.device_note.isVisible())
         self.assertEqual(window.device_note.property("tone"), "warning")
         self.assertIn("Soundcore Motion Boom niet verbonden.", window.device_note.text())
@@ -230,32 +230,47 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertFalse(window.device_rows[1].down_button.isEnabled())
         self.assertFalse(window.dirty)
 
-    def test_without_connected_list_microphones_the_windows_default_is_used(self):
-        _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.SOUNDCORE,)))
+    def test_windows_standaard_is_an_optional_entry(self):
+        _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.SOUNDCORE, "")))
         controller.devices = self.DEVICES
         window.refresh_devices()
         self.assertEqual(self.statuses(window), ["Niet verbonden", "In gebruik"])
-        self.assertIn("Windows-standaard (Realtek(R) Audio)", window.device_note.text())
+        self.assertEqual(window.device_rows[1].name_label.text(), "Windows-standaard")
+        self.assertIn("Volgt Windows · nu: Microfoonmatrix (Realtek(R) Audio)", window.device_rows[1].detail_label.text())
+        self.assertIn("prioriteit 2: Realtek(R) Audio", window.device_note.text())
         self.assertEqual(window.active_device_id(), "")
+        self.assertNotIn("", [device_id for device_id, _ in window.addable_devices()])
+        window.remove_device(1)
+        self.assertEqual(window.device_priority, [self.SOUNDCORE])
+        self.assertIn("", [device_id for device_id, _ in window.addable_devices()])
 
-    def test_no_microphone_at_all_is_shown_and_not_tested(self):
+    def test_without_a_working_microphone_in_the_list_nothing_is_used(self):
         _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.SOUNDCORE,)))
-        controller.devices = [("", "Windows-standaard (geen microfoon beschikbaar)")]
+        controller.devices = self.DEVICES  # Windows has microphones, but the list does not include them.
         window.refresh_devices()
-        self.assertEqual(self.statuses(window), ["Niet verbonden", "Niet verbonden"])
+        self.assertEqual(self.statuses(window), ["Niet verbonden"])
+        self.assertIsNone(window.active_device_id())
         self.assertEqual(window.device_note.property("tone"), "danger")
         self.assertIn("Geen microfoon gevonden", window.device_note.text())
-        self.assertIn("Nu: geen microfoon", window.windows_row.detail_label.text())
+        self.assertIn("voeg een andere microfoon toe", window.device_note.text())
         window.toggle_microphone_test()
         self.assertFalse(hasattr(controller, "tested_device"))
         self.assertIn("Geen microfoon gevonden", window.microphone_result_label.text())
         self.assertFalse(window.microphone_test_active)
 
+    def test_the_last_microphone_cannot_be_removed(self):
+        _, _controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.SOUNDCORE,)))
+        self.assertFalse(window.device_rows[0].remove_button.isEnabled())
+        self.assertIn("minstens één", window.device_rows[0].remove_button.toolTip())
+        window.remove_device(0)
+        self.assertEqual(window.device_priority, [self.SOUNDCORE])
+        self.assertFalse(window.dirty)
+
     def test_first_priority_in_use_needs_no_note(self):
-        _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.RODE,)))
+        _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=(self.RODE, "")))
         controller.devices = self.DEVICES
         window.refresh_devices()
-        self.assertEqual(self.statuses(window), ["In gebruik", "Vangnet"])
+        self.assertEqual(self.statuses(window), ["In gebruik", "Beschikbaar"])
         self.assertTrue(window.device_note.isHidden())
 
     def test_reordering_adding_and_removing_microphones_is_saved_in_order(self):
@@ -265,14 +280,16 @@ class SettingsWindowTests(unittest.TestCase):
         window._prepare_add_device_menu()
         texts = [action.text() for action in window.add_device_menu.actions() if action.text()]
         self.assertEqual(texts[1:3], ["Microfoon (Rode NT-USB Mini)", "Microfoonmatrix (Realtek(R) Audio)"])
+        self.assertTrue(texts[3].startswith("Windows-standaard"))
         self.assertIn("Verbind hem eerst", texts[-1])
         self.assertTrue(window.add_device_menu.actions()[1].isEnabled())
         window.add_device_menu.actions()[1].trigger()
         self.assertTrue(window.dirty)
         self.assertEqual(window.device_priority, [self.SOUNDCORE, self.RODE])
         window.add_device("wasapi:Microfoonmatrix (Realtek(R) Audio)")
+        window.add_device("")
         window.add_device(self.RODE)  # Already listed: ignored.
-        self.assertEqual(len(window.device_priority), 3)
+        self.assertEqual(len(window.device_priority), 4)
         window._prepare_add_device_menu()
         self.assertIn("Alle aangesloten microfoons staan al in de lijst.",
                       [action.text() for action in window.add_device_menu.actions()])
@@ -282,24 +299,24 @@ class SettingsWindowTests(unittest.TestCase):
         window.device_rows[0].down_button.click()
         self.assertEqual(window.device_priority[:2], [self.SOUNDCORE, self.RODE])
         window.device_rows[2].remove_button.click()
-        self.assertEqual(window.device_priority, [self.SOUNDCORE, self.RODE])
+        self.assertEqual(window.device_priority, [self.SOUNDCORE, self.RODE, ""])
         window.save()
-        self.assertEqual(controller.applied[-1].input_devices, (self.SOUNDCORE, self.RODE))
+        self.assertEqual(controller.applied[-1].input_devices, (self.SOUNDCORE, self.RODE, ""))
 
     def test_refreshing_updates_the_windows_default_without_changes(self):
         _, controller, window = self.open_window(make_config(api_key="test-only"))
-        self.assertEqual(window.device_rows, [])
+        self.assertEqual(window.device_priority, [""])
         self.assertEqual(self.statuses(window), ["In gebruik"])
-        self.assertIn("Microfoonarray (Realtek Audio)", window.windows_row.detail_label.text())
+        self.assertIn("Microfoonarray (Realtek Audio)", window.device_rows[0].detail_label.text())
         controller.devices = [("", "Windows-standaard: USB Headset Microfoon"), ("3", "3: Test microfoon")]
         window.refresh_devices()
-        self.assertIn("USB Headset Microfoon", window.windows_row.detail_label.text())
+        self.assertIn("USB Headset Microfoon", window.device_rows[0].detail_label.text())
         self.assertFalse(window.dirty)
         window.save()
-        self.assertEqual(controller.applied[-1].input_devices, ())
+        self.assertEqual(controller.applied[-1].input_devices, ("",))
 
     def test_microphone_test_uses_unsaved_list_and_closes_without_saving(self):
-        _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=("3",)))
+        _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=("3", "")))
         self.assertFalse(any(b.text() == "Geluiden testen" for b in window.findChildren(QPushButton)))
         self.assertEqual(window.active_device_id(), "3")
         window.remove_device(0)
@@ -340,7 +357,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.pump()
         self.assertTrue(controller.microphone_stopped)
         self.assertEqual(controller.applied, [])
-        self.assertEqual(controller.config.input_devices, ("3",))
+        self.assertEqual(controller.config.input_devices, ("3", ""))
 
     def test_row_buttons_are_disabled_during_a_microphone_test(self):
         _, controller, window = self.open_window(make_config(api_key="test-only", input_devices=("3", self.SOUNDCORE)))

@@ -272,10 +272,14 @@ class StatusBubble(QWidget):
     # -- states --------------------------------------------------------------
 
     def set_input(self, choice: InputChoice | None) -> None:
-        """Microphone of the next recording, or a switch during this one; only a fallback is shown."""
-        self.input_choice = choice if choice is not None and choice.fallback else None
+        """Microphone of the next recording, or a switch during this one.
+
+        A fallback gets the card and the badge; switching back to a higher
+        priority during the recording gets a card too.
+        """
+        self.input_choice = choice
         if self.state == "recording":
-            self.input_notice_visible = self.input_choice is not None
+            self.input_notice_visible = choice is not None and (choice.fallback or choice.returned)
             if self.input_notice_visible:
                 self.input_notice_timer.start()
             self.fit_window()
@@ -299,7 +303,7 @@ class StatusBubble(QWidget):
         self.opens_microphone_settings = False
         if state != "recording":
             self.input_choice = None
-        self.input_notice_visible = state == "recording" and self.input_choice is not None
+        self.input_notice_visible = state == "recording" and self.shows_badge()
         if self.input_notice_visible:
             self.input_notice_timer.start()
         else:
@@ -404,23 +408,29 @@ class StatusBubble(QWidget):
         width, height = self.pill_size.width(), self.pill_size.height()
         return QRectF((self.width() - width) / 2, self.height() - BUBBLE_MARGIN - height, width, height)
 
+    def shows_badge(self) -> bool:
+        return self.input_choice is not None and self.input_choice.fallback
+
     def badge_width(self) -> int:
-        return RECORDING_BADGE_WIDTH if self.input_choice is not None else 0
+        return RECORDING_BADGE_WIDTH if self.shows_badge() else 0
 
     def input_notice_texts(self) -> tuple[str, str]:
         choice = self.input_choice
         if choice is None:
             return "", ""
         name = short_device_name(choice.name) or DEFAULT_DEVICE_LABEL
-        if choice.lost:
+        title = f"Overgeschakeld naar {name}"
+        if choice.returned:
+            title, detail = f"Terug naar {name}", "Weer verbonden"
+        elif choice.lost:
             detail = f"Verbinding met {short_device_name(choice.lost)} verbroken"
         else:
             detail = unavailable_microphones_text(
                 [short_device_name(skipped) for skipped in choice.skipped], connected=choice.skipped_missing,
             )
-        if not choice.priority and name != DEFAULT_DEVICE_LABEL:
+        if choice.windows_default and name != DEFAULT_DEVICE_LABEL:
             detail += f" · {DEFAULT_DEVICE_LABEL}"
-        return f"Overgeschakeld naar {name}", detail
+        return title, detail
 
     def input_notice_size(self) -> QSize:
         title, detail = self.input_notice_texts()
@@ -450,27 +460,28 @@ class StatusBubble(QWidget):
         painter.setBrush(fill)
         painter.drawRoundedRect(rect, radius, radius)
 
+    def _notice_tone(self, theme) -> QColor:
+        # Amber for a fallback, green when a higher priority is back.
+        returned = self.input_choice is not None and self.input_choice.returned
+        return QColor(theme.success if returned else theme.warning_text)
+
     def _paint_priority_badge(self, painter: QPainter, rect: QRectF, theme, points: float) -> None:
-        amber = QColor(theme.warning_text)
-        soft = QColor(amber)
+        tone = self._notice_tone(theme)
+        soft = QColor(tone)
         soft.setAlpha(40)
-        ring = QColor(amber)
+        ring = QColor(tone)
         ring.setAlpha(110)
         painter.setPen(ring)
         painter.setBrush(soft)
         painter.drawEllipse(rect.adjusted(0.5, 0.5, -0.5, -0.5))
-        choice = self.input_choice
-        if choice is not None and choice.priority:
-            painter.setPen(amber)
+        if self.input_choice is not None:
+            painter.setPen(tone)
             painter.setFont(self._font(points, QFont.Weight.Bold))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(choice.priority))
-        else:
-            inset = rect.width() * 0.27
-            draw_glyph(painter, "windows", rect.adjusted(inset, inset, -inset, -inset), amber)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.input_choice.priority))
 
     def _paint_input_notice(self, painter: QPainter, theme) -> None:
         card = self._input_notice_rect()
-        border = QColor(theme.warning_text)
+        border = self._notice_tone(theme)
         border.setAlpha(90)
         self._paint_surface(painter, card, 16, theme, border)
         badge = QRectF(card.left() + 12, card.center().y() - 13, 26, 26)
@@ -513,7 +524,7 @@ class StatusBubble(QWidget):
     def _paint_recording(self, painter: QPainter, pill: QRectF, theme, text_color: QColor) -> None:
         middle = pill.center().y()
         left = pill.left() + 20
-        if self.input_choice is not None:
+        if self.shows_badge():
             self._paint_priority_badge(painter, QRectF(pill.left() + 14, middle - 10, 20, 20), theme, 8.5)
             left += RECORDING_BADGE_WIDTH
         red = QColor(RECORD_RED)

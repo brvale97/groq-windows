@@ -140,26 +140,35 @@ class InputDeviceResolutionTests(unittest.TestCase):
         self.assertFalse(choice.skipped_missing)
         self.assertEqual(opened, [11])
 
-    def test_the_windows_default_is_the_last_resort(self) -> None:
-        choice, opened, _calls = self.open_input([self.SOUNDCORE, self.RODE])
-        self.assertEqual((choice.priority, choice.device, choice.wasapi), (0, None, False))
+    def test_without_a_safety_net_missing_microphones_mean_no_microphone(self) -> None:
+        error, opened, _calls = self.open_input([self.SOUNDCORE, self.RODE])
+        self.assertIsInstance(error, engine.NoMicrophoneError)
+        self.assertFalse(error.found)
+        self.assertEqual(opened, [])
+
+    def test_windows_standaard_is_an_entry_like_any_other(self) -> None:
+        choice, opened, _calls = self.open_input([self.SOUNDCORE, "", self.RODE], connected=[self.RODE])
+        self.assertEqual((choice.priority, choice.device, choice.wasapi, choice.windows_default), (2, None, False, True))
         self.assertEqual(choice.name, "Microfoonmatrix (Realtek(R) Audio)")
-        self.assertEqual(len(choice.skipped), 2)
+        self.assertEqual(choice.skipped, ("Headset Microphone (Soundcore Motion Boom)",))
         self.assertEqual(opened, [None])
+        # Without a Windows default microphone the entry is skipped like a missing one.
+        choice, opened, _calls = self.open_input(["", self.RODE], connected=[self.RODE], default=None)
+        self.assertEqual((choice.priority, choice.skipped), (2, ("Windows-standaard",)))
 
     def test_an_empty_list_just_uses_the_windows_default(self) -> None:
         choice, opened, calls = self.open_input([])
-        self.assertEqual((choice.priority, choice.fallback), (0, False))
+        self.assertEqual((choice.priority, choice.fallback, choice.windows_default), (1, False, True))
         self.assertEqual(calls, [("refresh",)])
         self.assertEqual(opened, [None])
 
     def test_no_microphone_at_all_is_reported(self) -> None:
-        error, opened, _calls = self.open_input([self.SOUNDCORE], default=None, default_opens=False)
+        error, opened, _calls = self.open_input([self.SOUNDCORE, ""], default=None, default_opens=False)
         self.assertIsInstance(error, engine.NoMicrophoneError)
         self.assertFalse(error.found)
         self.assertIn("Geen microfoon gevonden", str(error))
         self.assertEqual(opened, [])
-        error, _opened, _calls = self.open_input([self.SOUNDCORE], default_opens=False)
+        error, _opened, _calls = self.open_input([self.SOUNDCORE, ""], default_opens=False)
         self.assertTrue(error.found)  # Windows has a default microphone, it just would not open.
         self.assertIn("kon worden geopend", str(error))
 
