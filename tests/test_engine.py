@@ -239,6 +239,39 @@ class EngineTests(unittest.TestCase):
         self.assertIn("Terug naar", events[1][1])
         self.assertEqual(dictation.lost_inputs, set())
 
+    def test_microphones_listed_again_are_no_longer_excluded(self) -> None:
+        # A lost -> B, B lost -> C, then A and B come back together: back to A,
+        # and B must be usable again if A drops later.
+        events = []
+        dictation, old_stream = self.recording_engine(events, priority=2)
+        dictation.lost_inputs = {self.SOUNDCORE, "B"}
+        choice = engine.InputChoice(3, self.SOUNDCORE, 1, True)
+        with (
+            mock.patch.object(engine, "live_input_names", return_value=["TONOR", self.SOUNDCORE, "B"]),
+            mock.patch.object(dictation, "_open_input", return_value=(mock.Mock(), choice)) as open_input,
+            mock.patch.object(dictation, "_watch_input"),
+        ):
+            dictation.switch_input(old_stream, lost=False, returned=self.SOUNDCORE)
+        self.assertEqual(open_input.call_args.kwargs["exclude"], frozenset())
+        self.assertEqual(dictation.lost_inputs, set())
+        # The microphone just lost stays excluded even while Windows still lists it.
+        dictation.stream.close.reset_mock()
+        with (
+            mock.patch.object(engine, "live_input_names", return_value=["TONOR", self.SOUNDCORE]),
+            mock.patch.object(dictation, "_open_input", return_value=(mock.Mock(), choice)) as open_input,
+            mock.patch.object(dictation, "_watch_input"),
+        ):
+            dictation.switch_input(dictation.stream, lost=True)
+        self.assertEqual(open_input.call_args.kwargs["exclude"], frozenset({self.SOUNDCORE}))
+
+    def test_watchdog_reads_the_stream_state_under_the_transition_lock(self) -> None:
+        events = []
+        dictation, stream = self.recording_engine(events)
+        held = []
+        type(stream).active = mock.PropertyMock(side_effect=lambda: held.append(dictation.stream_transition_lock.locked()) or True)
+        self.run_watchdog(dictation, stream, [None] * 10, ticks=3)
+        self.assertEqual(held, [True, True])
+
     def test_a_returned_microphone_that_does_not_open_is_retried_later(self) -> None:
         events = []
         dictation, old_stream = self.recording_engine(events, priority=2)

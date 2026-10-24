@@ -270,6 +270,14 @@ class StatusBubbleTests(unittest.TestCase):
         self.assertEqual(self.bubble.badge_width(), 0)  # Priority 1 again: no amber number.
         self.bubble.grab()
 
+    def test_a_return_to_a_fallback_keeps_an_amber_badge(self):
+        from ui_theme import current_theme
+
+        theme = current_theme()
+        self.bubble.set_input(app.InputChoice(None, "B", 2, True, ("A",), returned=True))
+        self.assertEqual(self.bubble.notice_tone(theme, card=True).name(), theme.success)
+        self.assertEqual(self.bubble.notice_tone(theme, card=False).name(), theme.warning_text)
+
     def test_the_first_priority_needs_no_card(self):
         self.bubble.set_input(app.InputChoice(3, "Microfoon (Rode NT-USB Mini)", 1, True))
         self.bubble.set_state("recording")

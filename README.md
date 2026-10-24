@@ -140,7 +140,7 @@ and changed "transcribt" to "transcribeert". A cleanup took 0.1-0.6 s
 (median 0.3 s). Bench scripts and results: `dist-release/v0.2.7/bench/`
 (not in Git).
 
-## Microphone priority (0.2.7.3 test)
+## Microphone priority (0.2.7.4 test)
 
 <!-- Source: Bram's request in T3, 2026-10-24 (priority 1, 2, 3; switch automatically and show it; show clearly when there is no microphone), his approval of the mockup ("Ja, bouw maar in, dat is perfect"), and the tests below. Scope: microphone choice and the status bubble. -->
 A friend had chosen a Bluetooth headset that was not connected; Alt+Z then
@@ -191,8 +191,8 @@ opens Settings at the microphones.
 
 `settings.json` keeps `input_device` as the first entry ("" for
 Windows-standaard) next to the `input_devices` list, so an older version (after
-a rollback) still uses the preferred microphone; a microphone chosen in such a
-version moves to the top of the list.
+a rollback) still uses the preferred microphone. Such a version saves the file
+without the list, so after a rollback the list shrinks to that one microphone.
 
 ## Updates
 

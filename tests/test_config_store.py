@@ -107,17 +107,12 @@ class ConfigStoreTests(unittest.TestCase):
         _path, _text, loaded = self.load_settings({"input_device": "", "input_devices": []})
         self.assertEqual(loaded.input_devices, ("",))
 
-    def test_a_microphone_chosen_in_an_older_version_moves_to_the_top(self) -> None:
-        # After a rollback 0.2.7 only rewrites "input_device".
-        _path, _text, loaded = self.load_settings({
-            "input_device": "wasapi:B", "input_devices": ["wasapi:A", "wasapi:B", "wasapi:C"],
-        })
-        self.assertEqual(loaded.input_devices, ("wasapi:B", "wasapi:A", "wasapi:C"))
-        _path, _text, loaded = self.load_settings({"input_device": "wasapi:D", "input_devices": ["wasapi:A"]})
-        self.assertEqual(loaded.input_devices, ("wasapi:D", "wasapi:A"))
-        # An older version that switched to Windows-standaard wrote "".
-        _path, _text, loaded = self.load_settings({"input_device": "", "input_devices": ["wasapi:A", ""]})
-        self.assertEqual(loaded.input_devices, ("", "wasapi:A"))
+    def test_a_rollback_to_0_2_7_keeps_only_the_first_microphone(self) -> None:
+        # 0.2.7 saves its own fields only: the list is gone, "input_device" stays.
+        rolled_back = {k: v for k, v in self.LEGACY_0_2_7.items()}
+        rolled_back["input_device"] = "wasapi:D"  # Chosen in 0.2.7 after the rollback.
+        _path, _text, loaded = self.load_settings(rolled_back)
+        self.assertEqual(loaded.input_devices, ("wasapi:D",))
 
     def test_invalid_priority_entries_are_dropped(self) -> None:
         _path, _text, loaded = self.load_settings({

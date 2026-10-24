@@ -460,13 +460,13 @@ class StatusBubble(QWidget):
         painter.setBrush(fill)
         painter.drawRoundedRect(rect, radius, radius)
 
-    def _notice_tone(self, theme) -> QColor:
-        # Amber for a fallback, green when a higher priority is back.
-        returned = self.input_choice is not None and self.input_choice.returned
+    def notice_tone(self, theme, *, card: bool) -> QColor:
+        # Amber for a fallback; the card turns green when a higher priority is
+        # back. The badge in the pill stays amber while it is still a fallback.
+        returned = card and self.input_choice is not None and self.input_choice.returned
         return QColor(theme.success if returned else theme.warning_text)
 
-    def _paint_priority_badge(self, painter: QPainter, rect: QRectF, theme, points: float) -> None:
-        tone = self._notice_tone(theme)
+    def _paint_priority_badge(self, painter: QPainter, rect: QRectF, tone: QColor, points: float) -> None:
         soft = QColor(tone)
         soft.setAlpha(40)
         ring = QColor(tone)
@@ -481,11 +481,11 @@ class StatusBubble(QWidget):
 
     def _paint_input_notice(self, painter: QPainter, theme) -> None:
         card = self._input_notice_rect()
-        border = self._notice_tone(theme)
+        border = self.notice_tone(theme, card=True)
         border.setAlpha(90)
         self._paint_surface(painter, card, 16, theme, border)
         badge = QRectF(card.left() + 12, card.center().y() - 13, 26, 26)
-        self._paint_priority_badge(painter, badge, theme, 9.5)
+        self._paint_priority_badge(painter, badge, self.notice_tone(theme, card=True), 9.5)
         title, detail = self.input_notice_texts()
         text_left = badge.right() + 10
         text_width = card.right() - 16 - text_left
@@ -525,7 +525,9 @@ class StatusBubble(QWidget):
         middle = pill.center().y()
         left = pill.left() + 20
         if self.shows_badge():
-            self._paint_priority_badge(painter, QRectF(pill.left() + 14, middle - 10, 20, 20), theme, 8.5)
+            self._paint_priority_badge(
+                painter, QRectF(pill.left() + 14, middle - 10, 20, 20), self.notice_tone(theme, card=False), 8.5,
+            )
             left += RECORDING_BADGE_WIDTH
         red = QColor(RECORD_RED)
         for index, height in enumerate(self.bar_heights()):

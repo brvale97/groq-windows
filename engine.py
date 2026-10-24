@@ -590,14 +590,17 @@ class DictationEngine:
         ticks = 0
         while True:
             time.sleep(INPUT_WATCH_INTERVAL_SECONDS)
-            with self.lock:
-                if self.state != "recording" or self.stream is not stream:
-                    return
+            # Stop and switch close streams under the transition lock; asking
+            # PortAudio about a stream that is being closed could crash.
+            with self.stream_transition_lock:
+                with self.lock:
+                    if self.state != "recording" or self.stream is not stream:
+                        return
+                try:
+                    active = bool(stream.active)
+                except Exception:
+                    active = False
             ticks += 1
-            try:
-                active = bool(stream.active)
-            except Exception:
-                active = False
             reason, returned = "", ""
             if not active:
                 reason = "stream gestopt"
@@ -648,6 +651,11 @@ class DictationEngine:
                     action()
                 except Exception as exc:
                     logging.info("Old input stream: %s", exc)
+            # Microphones lost earlier in this recording that Windows lists
+            # again may be used again (also lower ones than the one returning).
+            listed = live_input_names()
+            if listed is not None:
+                self.lost_inputs = {name for name in self.lost_inputs if name not in listed}
             if lost and previous_name:
                 self.lost_inputs.add(previous_name)
             if returned:

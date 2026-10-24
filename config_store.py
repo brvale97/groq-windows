@@ -20,7 +20,7 @@ import keyring
 from dictation_core import normalize_custom_words, normalize_word_replacements
 from text_cleanup import DEFAULT_CLEANUP_MODEL, normalize_cleanup_prompt
 
-APP_VERSION = "0.2.7.3"
+APP_VERSION = "0.2.7.4"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
@@ -171,18 +171,15 @@ def stored_input_devices(data: dict, env: dict[str, str]) -> tuple[str, ...]:
     """The priority list, migrated from the single microphone of 0.2.7 and older.
 
     ``input_device`` keeps being written as the first priority, so an older
-    version (after a rollback) still uses the preferred microphone. If such a
-    version changed it, that choice moves to the top of the list.
+    version (after a rollback) still uses the preferred microphone. Such a
+    version rewrites the file without ``input_devices``, so the list then
+    shrinks to the microphone it used.
     """
-    legacy = data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", "")
-    legacy = legacy if isinstance(legacy, str) else str(legacy)
     raw = data.get("input_devices")
-    if not isinstance(raw, (list, tuple)):
-        return normalize_input_devices([legacy])
-    devices = normalize_input_devices(raw)
-    if isinstance(data.get("input_device"), str) and devices[0] != legacy:
-        devices = (legacy, *(device for device in devices if device != legacy))
-    return devices
+    if isinstance(raw, (list, tuple)):
+        return normalize_input_devices(raw)
+    legacy = data.get("input_device") if data.get("input_device") is not None else env.get("DICTATION_INPUT_DEVICE", "")
+    return normalize_input_devices([legacy if isinstance(legacy, str) else str(legacy)])
 
 
 def load_config() -> Config:
