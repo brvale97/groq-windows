@@ -129,10 +129,12 @@ class EngineTests(unittest.TestCase):
         stream = mock.Mock()
         with (
             mock.patch.object(dictation, "_open_input", return_value=(stream, choice)) as open_input,
+            mock.patch.object(dictation, "_watch_input") as watch,
             mock.patch.object(engine, "play_sound") as play_sound,
         ):
             dictation.start_recording()
         open_input.assert_called_once()
+        watch.assert_called_once_with(stream)
         self.assertEqual(open_input.call_args.args[0], ("wasapi:A", "wasapi:B"))
         self.assertEqual(events, [choice, "recording"])
         self.assertIs(dictation.stream, stream)
@@ -156,6 +158,115 @@ class EngineTests(unittest.TestCase):
             self.assertIsNone(dictation.active_session)
             play_sound.assert_called_once_with("error.wav")
         self.assertIn("Geen microfoon gevonden", messages[0])
+
+    def recording_engine(self, events):
+        dictation = engine.DictationEngine(
+            Config(api_key="test"), status_callback=lambda message: events.append(("status", message)),
+            state_callback=lambda state: events.append(("state", state)),
+            input_callback=lambda choice: events.append(("input", choice)),
+        )
+        lost_stream = mock.Mock()
+        dictation.state = "recording"
+        dictation.stream = lost_stream
+        dictation.active_session = mock.Mock()
+        dictation.active_selectors = ("wasapi:Headset Microphone (Soundcore Motion Boom)", "wasapi:TONOR")
+        dictation.active_input = engine.InputChoice(3, "Headset Microphone (Soundcore Motion Boom)", 1, True)
+        dictation.audio_queue.put("audio before the drop")
+        return dictation, lost_stream
+
+    def test_a_microphone_lost_during_the_recording_is_replaced(self) -> None:
+        events = []
+        dictation, lost_stream = self.recording_engine(events)
+        new_stream = mock.Mock()
+        choice = engine.InputChoice(5, "TONOR", 2, True, ("Headset Microphone (Soundcore Motion Boom)",))
+        with (
+            mock.patch.object(dictation, "_open_input", return_value=(new_stream, choice)) as open_input,
+            mock.patch.object(dictation, "_watch_input") as watch,
+        ):
+            dictation.replace_lost_input(lost_stream)
+        lost_stream.close.assert_called_once_with()
+        self.assertEqual(open_input.call_args.kwargs["exclude"], frozenset({"Headset Microphone (Soundcore Motion Boom)"}))
+        self.assertEqual(open_input.call_args.args[0], dictation.active_selectors)
+        self.assertEqual(dictation.state, "recording")
+        self.assertIs(dictation.stream, new_stream)
+        self.assertEqual(dictation.active_input.lost, "Headset Microphone (Soundcore Motion Boom)")
+        self.assertEqual(events[0], ("input", dictation.active_input))
+        self.assertTrue(dictation.active_input.fallback)
+        watch.assert_called_once_with(new_stream)
+        # The same recording continues: audio from before the drop is kept.
+        self.assertEqual(dictation.audio_queue.get_nowait(), "audio before the drop")
+
+    def test_without_another_microphone_the_recording_stops_and_is_transcribed(self) -> None:
+        events = []
+        dictation, lost_stream = self.recording_engine(events)
+        with (
+            mock.patch.object(dictation, "_open_input", side_effect=engine.NoMicrophoneError(found=False)),
+            mock.patch.object(engine, "play_sound") as play_sound,
+            mock.patch.object(engine.threading, "Thread") as thread,
+        ):
+            dictation.replace_lost_input(lost_stream)
+        self.assertEqual(dictation.state, "processing")
+        self.assertIn(("state", "processing"), events)
+        play_sound.assert_called_once_with("error.wav")
+        self.assertEqual(thread.call_args.kwargs["target"], dictation.transcribe_and_output)
+        self.assertEqual(thread.call_args.kwargs["args"][1], ["audio before the drop"])
+
+    def test_a_stopped_recording_is_not_switched(self) -> None:
+        events = []
+        dictation, lost_stream = self.recording_engine(events)
+        dictation.state = "processing"
+        with mock.patch.object(dictation, "_open_input") as open_input:
+            dictation.replace_lost_input(lost_stream)
+        open_input.assert_not_called()
+        lost_stream.close.assert_not_called()
+
+    def test_watchdog_reacts_to_a_stopped_stream_or_missing_audio(self) -> None:
+        events = []
+        for active, silent_for in ((False, 0.0), (True, engine.INPUT_STALL_SECONDS + 0.5)):
+            dictation, stream = self.recording_engine(events)
+            stream.active = active
+            dictation.last_audio_at = engine.time.monotonic() - silent_for
+            with (
+                mock.patch.object(engine, "INPUT_WATCH_INTERVAL_SECONDS", 0.001),
+                mock.patch.object(dictation, "replace_lost_input") as replace,
+            ):
+                dictation._input_watchdog(stream)
+            replace.assert_called_once_with(stream)
+
+    def test_watchdog_leaves_a_working_microphone_alone_and_ends_with_the_recording(self) -> None:
+        events = []
+        dictation, stream = self.recording_engine(events)
+        stream.active = True
+        dictation.last_audio_at = engine.time.monotonic()
+        sleeps = []
+
+        def sleep(_seconds):
+            sleeps.append(True)
+            if len(sleeps) == 3:
+                dictation.state = "processing"
+
+        with (
+            mock.patch.object(engine.time, "sleep", side_effect=sleep),
+            mock.patch.object(dictation, "replace_lost_input") as replace,
+        ):
+            dictation._input_watchdog(stream)
+        replace.assert_not_called()
+        self.assertEqual(len(sleeps), 3)
+
+    def test_lost_microphones_are_not_reopened_in_the_same_recording(self) -> None:
+        dictation = engine.DictationEngine.__new__(engine.DictationEngine)
+        dictation.refresh_inputs = lambda: None
+        dictation._open_stream = mock.Mock(return_value="stream")
+        with (
+            mock.patch.object(engine, "resolve_input_device", return_value=1) as resolve,
+            mock.patch.object(engine, "default_input_name", return_value="TONOR"),
+        ):
+            _stream, choice = dictation._open_input(("wasapi:Soundcore", "wasapi:TONOR"), mock.Mock(),
+                                                    exclude=frozenset({"Soundcore"}))
+            self.assertEqual((choice.priority, choice.skipped), (2, ("Soundcore",)))
+            resolve.assert_called_once_with("wasapi:TONOR")
+            with self.assertRaises(engine.NoMicrophoneError):
+                dictation._open_input((), mock.Mock(), exclude=frozenset({"TONOR"}))
 
     def test_transcription_sends_one_combined_prompt(self) -> None:
         client = mock.Mock()

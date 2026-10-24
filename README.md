@@ -140,7 +140,7 @@ and changed "transcribt" to "transcribeert". A cleanup took 0.1-0.6 s
 (median 0.3 s). Bench scripts and results: `dist-release/v0.2.7/bench/`
 (not in Git).
 
-## Microphone priority (0.2.7.1 test)
+## Microphone priority (0.2.7.2 test)
 
 <!-- Source: Bram's request in T3, 2026-10-24 (priority 1, 2, 3; switch automatically and show it; show clearly when there is no microphone), his approval of the mockup ("Ja, bouw maar in, dat is perfect"), and the tests below. Scope: microphone choice and the status bubble. -->
 A friend had chosen a Bluetooth headset that was not connected; Alt+Z then
@@ -151,15 +151,25 @@ preference: each recording uses the first microphone that is connected.
 says **In gebruik**, **Beschikbaar** or **Niet verbonden**, with buttons to move
 it up or down or remove it. **Microfoon toevoegen** offers the microphones that
 are connected now; Windows only lists a Bluetooth headset while it is connected.
-**Microfoon testen** tests the microphone the next recording would use.
+**Microfoon testen** tests the microphone the next recording would use. It
+records until you click **Stop test** (at most 10 seconds) and keeps what you
+said for **Terugluisteren**; before 0.2.7.2 it always took 5 seconds.
 
 The app reads the Windows audio devices again at every shortcut press
 (re-initializing PortAudio took about 40 ms on AMD), so a headset that connected
-or disconnected since the previous recording counts. It never switches during a
-recording. A listed microphone that cannot be opened is skipped too.
+or disconnected since the previous recording counts. A listed microphone that
+cannot be opened is skipped too.
+
+<!-- Source: Bram in T3, 2026-10-24: "ik wil dat die fallback ook werkt als TIJDENS het recorden de verbinding wegvalt". -->
+If the microphone disappears during a recording (its stream stops, or no audio
+arrives for 1 second), the app switches to the next microphone of the list and
+the same recording continues; what was said during the switch (about a second)
+is missing. A microphone lost this way is not used again in that recording. If
+none is left, the recording stops and what was captured is transcribed.
 
 If the recording does not use priority 1, a card above the bubble says
-**Overgeschakeld naar …** and which microphones were not connected for 3 seconds;
+**Overgeschakeld naar …** and which microphones were not connected (or
+**Verbinding met … verbroken** after a switch during the recording) for 3 seconds;
 an amber number (or the Windows logo for Windows-standaard) stays in the bubble
 until the recording ends. Without any microphone nothing is recorded: the error
 sound plays and a red card **Geen microfoon gevonden** stays for 6 seconds;

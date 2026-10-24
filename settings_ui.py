@@ -104,6 +104,7 @@ class SettingsController(Protocol):
     def start_microphone_test(self, selector: str) -> None: ...
     def microphone_test_status(self) -> MicrophoneTestStatus: ...
     def play_microphone_test(self) -> float: ...
+    def finish_microphone_test(self) -> None: ...
     def stop_microphone_test(self) -> None: ...
     def autostart_enabled(self) -> bool: ...
     def apply_settings(self, new_config) -> None: ...
@@ -1481,8 +1482,9 @@ class SettingsWindow(QWidget):
 
     def toggle_microphone_test(self) -> None:
         if self.microphone_test_active:
-            self._close_microphone_test()
-            self.microphone_result_label.setText("Test gestopt.")
+            # Keep what was said so far; the next tick offers it for playback.
+            self.controller.finish_microphone_test()
+            self.microphone_test_button.setEnabled(False)
             return
         self.stop_recording_playback()
         self._close_microphone_test()
@@ -1514,11 +1516,12 @@ class SettingsWindow(QWidget):
             name = self.microphone_test_name
             self.microphone_result_label.setText(
                 f"{name} openen…" if status.state == "opening"
-                else f"Zeg een paar woorden in {name}… "
-                     f"{min(status.elapsed, status.duration):.1f} / {status.duration:.0f} seconden"
+                else f"Zeg een paar woorden in {name} en klik op Stop test. "
+                     f"{min(status.elapsed, status.duration):.1f} s (stopt vanzelf na {status.duration:.0f} s)"
             )
             return
         self.microphone_timer.stop()
+        self.microphone_test_button.setEnabled(True)
         self.microphone_test_active = False
         self.microphone_test_button.setText("Opnieuw testen")
         self.microphone_test_button.setIcon(icon("mic"))
@@ -1567,6 +1570,7 @@ class SettingsWindow(QWidget):
 
     def _close_microphone_test(self) -> None:
         self.microphone_timer.stop()
+        self.microphone_test_button.setEnabled(True)
         self._stop_microphone_playback()
         if self.microphone_test_used:
             self.controller.stop_microphone_test()

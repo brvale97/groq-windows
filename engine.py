@@ -61,6 +61,10 @@ POST_STOP_RECORDING_SECONDS = 0.15
 AUDIO_LEVEL_NOISE_FLOOR = 0.003
 AUDIO_LEVEL_FULL_SCALE = 0.25
 AUDIO_LEVEL_TIMEOUT_SECONDS = 0.25
+# During a recording: no audio callback for this long means the microphone is
+# gone (a Bluetooth headset that dropped, a USB microphone pulled out).
+INPUT_STALL_SECONDS = 1.0
+INPUT_WATCH_INTERVAL_SECONDS = 0.2
 # Dictaphone-style waveform: each tick adds one bar on the right and older bars
 # scroll left, so the last ~0.7 s of speech stays visible.
 WAVE_BAR_COUNT = 11
@@ -276,10 +280,12 @@ class InputChoice:
     # True when every skipped microphone was missing, False when one was
     # present but could not be opened.
     skipped_missing: bool = True
+    # The microphone this recording lost when it switched to this one.
+    lost: str = ""
 
     @property
     def fallback(self) -> bool:
-        return bool(self.skipped)
+        return bool(self.skipped or self.lost)
 
 
 class NoMicrophoneError(RuntimeError):
@@ -343,6 +349,11 @@ class DictationEngine:
         self.audio_level_peak = 0.0
         self.stream: sd.InputStream | None = None
         self.active_session: RecordingSession | None = None
+        self.active_input: InputChoice | None = None
+        self.active_selectors: tuple[str, ...] = ()
+        # Microphones lost during the current recording; never reopened in it.
+        self.lost_inputs: set[str] = set()
+        self.last_audio_at = 0.0
         self.state = "idle"
         self.lock = threading.Lock()
         self.stream_transition_lock = threading.Lock()
@@ -428,6 +439,8 @@ class DictationEngine:
             self.audio_warning = None
             self.audio_level_reading = (0.0, 0.0)
             self.audio_level_peak = 0.0
+            self.active_selectors = config.input_devices
+            self.lost_inputs = set()
 
         try:
             stream, choice = self._open_input(config.input_devices, session)
@@ -446,18 +459,86 @@ class DictationEngine:
         with self.lock:
             self.stream = stream
             self.active_session = dataclasses.replace(session, input_device=choice.device, wasapi=choice.wasapi)
+            self.active_input = choice
+            self.last_audio_at = time.monotonic()
 
         self.input_callback(choice)
         self.emit_state("recording")
         play_sound("start.wav")
         self.notify("Opname gestart. Gebruik je shortcut opnieuw om te stoppen.")
+        self._watch_input(stream)
 
-    def _open_input(self, selectors: tuple[str, ...], session: RecordingSession) -> tuple[sd.InputStream, InputChoice]:
+    def _watch_input(self, stream) -> None:
+        threading.Thread(target=self._input_watchdog, args=(stream,), name="microphone-watch", daemon=True).start()
+
+    def _input_watchdog(self, stream) -> None:
+        """Notice when the microphone in use disappears during the recording."""
+        while True:
+            time.sleep(INPUT_WATCH_INTERVAL_SECONDS)
+            with self.lock:
+                if self.state != "recording" or self.stream is not stream:
+                    return
+            try:
+                active = bool(stream.active)
+            except Exception:
+                active = False
+            if active and time.monotonic() - self.last_audio_at < INPUT_STALL_SECONDS:
+                continue
+            try:
+                self.replace_lost_input(stream)
+            except Exception:
+                logging.exception("Could not switch microphones during the recording")
+            return
+
+    def replace_lost_input(self, lost_stream) -> None:
+        """Continue the same recording on the next microphone of the priority list.
+
+        Audio recorded so far stays; only what was said while switching (about
+        a second) is missing. Without any microphone left, the recording stops
+        and what was captured is transcribed as usual.
+        """
+        with self.stream_transition_lock, windows_audio_thread():
+            with self.lock:
+                if self.state != "recording" or self.stream is not lost_stream:
+                    return
+                session = self.active_session
+                lost = self.active_input
+                selectors = self.active_selectors
+                self.stream = None
+            lost_name = lost.name if lost is not None else ""
+            logging.warning("Microfoon %s geeft geen audio meer; overschakelen.", lost_name or "onbekend")
+            for action in (lost_stream.stop, lost_stream.close):
+                try:
+                    action()
+                except Exception as exc:
+                    logging.info("Lost input stream: %s", exc)
+            if lost_name:
+                self.lost_inputs.add(lost_name)
+            try:
+                stream, choice = self._open_input(selectors, session, exclude=frozenset(self.lost_inputs))
+            except NoMicrophoneError:
+                play_sound("error.wav")
+                self.notify("Microfoon weggevallen. De opname tot dat moment wordt verwerkt.")
+                self._stop_recording()
+                return
+            choice = dataclasses.replace(choice, lost=lost_name)
+            with self.lock:
+                self.stream = stream
+                self.active_input = choice
+                self.last_audio_at = time.monotonic()
+        self.input_callback(choice)
+        self.notify(f"Overgeschakeld naar {choice.name}; de opname loopt door.")
+        self._watch_input(stream)
+
+    def _open_input(
+        self, selectors: tuple[str, ...], session: RecordingSession, exclude: frozenset[str] = frozenset(),
+    ) -> tuple[sd.InputStream, InputChoice]:
         """Open the first microphone of the priority list that works, else the Windows default.
 
         PortAudio lists devices only when it initializes, so the list is read
         again first: a headset that connected or disconnected since the last
-        recording counts. Raises NoMicrophoneError if nothing can be opened.
+        recording counts. Microphones named in ``exclude`` (lost during this
+        recording) are skipped. Raises NoMicrophoneError if nothing can be opened.
         """
         try:
             self.refresh_inputs()
@@ -467,6 +548,9 @@ class DictationEngine:
         skipped_missing = True
         for priority, selector in enumerate(selectors, start=1):
             name = selector.removeprefix("wasapi:")
+            if name in exclude:
+                skipped.append(name)
+                continue
             try:
                 device = resolve_input_device(selector)
             except Exception as exc:
@@ -490,6 +574,8 @@ class DictationEngine:
             break
         else:
             default_name = default_input_name()
+            if default_name and default_name in exclude:
+                raise NoMicrophoneError(found=False)
             try:
                 stream = self._open_stream(session, None, wasapi=False)
             except Exception as exc:
@@ -535,6 +621,7 @@ class DictationEngine:
             self.stream = None
             session = self.active_session
             self.active_session = None
+            self.active_input = None
         self.emit_state("processing")
 
         if stream is not None:
@@ -570,6 +657,7 @@ class DictationEngine:
     def audio_callback(self, indata, frames, time_info, status) -> None:
         if status:
             self.audio_warning = str(status)
+        self.last_audio_at = time.monotonic()
         self.audio_queue.put(indata.copy())
         # The stream supplies int16 PCM. Cast before squaring to avoid overflow.
         values = np.asarray(indata, dtype=np.float32)

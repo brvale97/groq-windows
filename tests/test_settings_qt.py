@@ -110,6 +110,9 @@ class FakeController:
         self.playback = PlaybackStatus("microphone-test", 0.0, 5.0, True)
         return 5.0
 
+    def finish_microphone_test(self):
+        self.microphone_finished = True
+
     def stop_microphone_test(self):
         self.microphone_stopped = True
         self.microphone_status = MicrophoneTestStatus()
@@ -312,12 +315,18 @@ class SettingsWindowTests(unittest.TestCase):
         controller.microphone_status = MicrophoneTestStatus("recording", level=0.5, elapsed=2.5, duration=5)
         window._microphone_tick()
         self.assertEqual(window.microphone_level.value(), 50)
-        self.assertIn("in Realtek Audio…", window.microphone_result_label.text())
-        self.assertIn("2.5 / 5 seconden", window.microphone_result_label.text())
+        self.assertIn("in Realtek Audio en klik op Stop test", window.microphone_result_label.text())
+        self.assertIn("2.5 s (stopt vanzelf na 5 s)", window.microphone_result_label.text())
+        # Stopping early keeps the recording: the test finishes instead of closing.
+        window.toggle_microphone_test()
+        self.assertTrue(controller.microphone_finished)
+        self.assertFalse(window.microphone_test_button.isEnabled())
+        self.assertFalse(getattr(controller, "microphone_stopped", False))
         controller.microphone_status = MicrophoneTestStatus("ready", elapsed=5, duration=5, heard_audio=True)
         window._microphone_tick()
         self.assertFalse(window.microphone_timer.isActive())
         self.assertTrue(window.add_device_button.isEnabled())
+        self.assertTrue(window.microphone_test_button.isEnabled())
         self.assertIn("Geluid ontvangen", window.microphone_result_label.text())
         self.assertTrue(window.microphone_listen_button.isEnabled())
         window.listen_microphone_test()

@@ -14,6 +14,9 @@ import wave
 
 import numpy as np
 
+# The test runs until you click "Stop test", at most this long.
+MAX_TEST_SECONDS = 10.0
+
 
 @contextmanager
 def windows_audio_thread():
@@ -48,7 +51,7 @@ class MicrophoneTestStatus:
 
 
 class MicrophoneTest:
-    def __init__(self, backend, device, *, seconds=5.0, wasapi=False, finished=lambda: None):
+    def __init__(self, backend, device, *, seconds=MAX_TEST_SECONDS, wasapi=False, finished=lambda: None):
         self.backend = backend
         self.device = device
         self.seconds = seconds
@@ -63,6 +66,8 @@ class MicrophoneTest:
         self.level = 0.0
         self.updated_at = 0.0
         self.stop_requested = threading.Event()
+        # Stop now but keep what was recorded, so it can be played back.
+        self.finish_requested = threading.Event()
         self.complete = threading.Event()
         self._directory = None
         self.thread = threading.Thread(target=self._record, name="microphone-test", daemon=True)
@@ -120,7 +125,7 @@ class MicrophoneTest:
             self.state = "recording"
             deadline = time.monotonic() + self.seconds + 2
             while not self.complete.wait(0.05):
-                if self.stop_requested.is_set():
+                if self.stop_requested.is_set() or self.finish_requested.is_set():
                     break
                 if not stream.active:
                     raise RuntimeError("De microfoon is gestopt of losgekoppeld.")
@@ -129,7 +134,7 @@ class MicrophoneTest:
             stream.stop()
             stream.close()
             stream = None
-            if self.stop_requested.is_set():
+            if self.stop_requested.is_set() or (self.finish_requested.is_set() and not self.sample_count):
                 self.state = "cancelled"
                 self.frames.clear()
             elif not self.sample_count:
@@ -156,6 +161,9 @@ class MicrophoneTest:
             for frame in self.frames:
                 audio.writeframes(frame.tobytes())
         return path
+
+    def finish(self):
+        self.finish_requested.set()
 
     def close(self):
         self.stop_requested.set()

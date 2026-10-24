@@ -272,8 +272,16 @@ class StatusBubble(QWidget):
     # -- states --------------------------------------------------------------
 
     def set_input(self, choice: InputChoice | None) -> None:
-        """Microphone of the next recording; only a fallback is shown."""
+        """Microphone of the next recording, or a switch during this one; only a fallback is shown."""
         self.input_choice = choice if choice is not None and choice.fallback else None
+        if self.state == "recording":
+            self.input_notice_visible = self.input_choice is not None
+            if self.input_notice_visible:
+                self.input_notice_timer.start()
+            self.fit_window()
+            if self.isVisible():
+                self.position()
+            self.update()
 
     def hide_input_notice(self) -> None:
         self.input_notice_timer.stop()
@@ -404,9 +412,12 @@ class StatusBubble(QWidget):
         if choice is None:
             return "", ""
         name = short_device_name(choice.name) or DEFAULT_DEVICE_LABEL
-        detail = unavailable_microphones_text(
-            [short_device_name(skipped) for skipped in choice.skipped], connected=choice.skipped_missing,
-        )
+        if choice.lost:
+            detail = f"Verbinding met {short_device_name(choice.lost)} verbroken"
+        else:
+            detail = unavailable_microphones_text(
+                [short_device_name(skipped) for skipped in choice.skipped], connected=choice.skipped_missing,
+            )
         if not choice.priority and name != DEFAULT_DEVICE_LABEL:
             detail += f" · {DEFAULT_DEVICE_LABEL}"
         return f"Overgeschakeld naar {name}", detail
@@ -914,6 +925,10 @@ class TrayApp:
         # Never open a stream while a starting dictation resets PortAudio.
         with self.engine.stream_transition_lock:
             return self.player.play(MICROPHONE_TEST_KEY, self.microphone_test.playback_path())
+
+    def finish_microphone_test(self) -> None:
+        if self.microphone_test is not None:
+            self.microphone_test.finish()
 
     def stop_microphone_test(self) -> None:
         if self.player.status().key == MICROPHONE_TEST_KEY:

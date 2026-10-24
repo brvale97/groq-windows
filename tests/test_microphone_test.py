@@ -104,6 +104,36 @@ class MicrophoneCaptureTests(unittest.TestCase):
         self.assertIn('Windows audio niet beschikbaar', capture.snapshot().error)
         self.assertTrue(finished.is_set())
 
+    def test_stopping_early_keeps_the_audio_for_playback(self):
+        backend = FakeAudio()  # Delivers 9000 samples, far less than the maximum.
+        capture = MicrophoneTest(backend, 2)
+        try:
+            capture.start()
+            self.assertTrue(backend.started.wait(2))
+            capture.finish()
+            capture.thread.join(2)
+            status = capture.snapshot()
+            self.assertEqual(status.state, 'ready')
+            self.assertEqual(status.duration, 10)
+            self.assertAlmostEqual(status.elapsed, 9000 / 8000)
+            self.assertTrue(backend.stream.closed)
+            with wave.open(str(capture.playback_path()), 'rb') as audio:
+                self.assertEqual(audio.getnframes(), 9000)
+        finally:
+            capture.close()
+
+    def test_stopping_before_any_audio_is_just_cancelled(self):
+        backend = FakeAudio(continuous=True)
+        capture = MicrophoneTest(backend, 2)
+        try:
+            capture.start()
+            self.assertTrue(backend.started.wait(2))
+            capture.finish()
+            capture.thread.join(2)
+            self.assertEqual(capture.snapshot().state, 'cancelled')
+        finally:
+            capture.close()
+
     def test_cancelling_closes_stream_and_discards_audio(self):
         backend = FakeAudio(continuous=True)
         capture = MicrophoneTest(backend, 2)

@@ -235,6 +235,28 @@ class StatusBubbleTests(unittest.TestCase):
         self.assertIsNone(self.bubble.input_choice)
         self.assertEqual(self.bubble.badge_width(), 0)
 
+    def test_a_switch_during_the_recording_shows_the_card_again(self):
+        self.bubble.set_state("recording")
+        self.assertFalse(self.bubble.input_notice_visible)
+        plain_height = self.bubble.height()
+        lost = app.InputChoice(None, "Microfoon (TONOR TM310 shotgun Mic)", 2, True,
+                               ("Headset Microphone (Soundcore Motion Boom)",),
+                               lost="Headset Microphone (Soundcore Motion Boom)")
+        self.bubble.set_input(lost)
+        self.assertEqual(self.bubble.state, "recording")
+        self.assertTrue(self.bubble.input_notice_visible)
+        self.assertTrue(self.bubble.input_notice_timer.isActive())
+        self.assertGreater(self.bubble.height(), plain_height)
+        self.assertEqual(self.bubble.input_notice_texts(), (
+            "Overgeschakeld naar TONOR TM310 shotgun Mic", "Verbinding met Soundcore Motion Boom verbroken",
+        ))
+        self.bubble.wave_tick()
+        self.assertEqual(self.bubble.badge_width(), app.RECORDING_BADGE_WIDTH)
+        self.bubble.grab()
+        # The Windows default replacing a lost default microphone still counts as a switch.
+        self.bubble.set_input(app.InputChoice(None, "Microfoonmatrix (Realtek(R) Audio)", 0, lost="Microfoon (TONOR TM310 shotgun Mic)"))
+        self.assertEqual(self.bubble.input_notice_texts()[1], "Verbinding met TONOR TM310 shotgun Mic verbroken · Windows-standaard")
+
     def test_the_first_priority_needs_no_card(self):
         self.bubble.set_input(app.InputChoice(3, "Microfoon (Rode NT-USB Mini)", 1, True))
         self.bubble.set_state("recording")

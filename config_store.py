@@ -20,7 +20,7 @@ import keyring
 from dictation_core import normalize_custom_words, normalize_word_replacements
 from text_cleanup import DEFAULT_CLEANUP_MODEL, normalize_cleanup_prompt
 
-APP_VERSION = "0.2.7.1"
+APP_VERSION = "0.2.7.2"
 APP_NAME = "Groq Insert Dictation"
 APP_SLUG = "GroqInsertDictation"
 GITHUB_REPO = "brvale97/groq-windows"
