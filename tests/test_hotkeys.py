@@ -30,11 +30,11 @@ class ParseHotkeyTests(unittest.TestCase):
         hotkey = parse_hotkey("ctrl+alt+shift+windows+k")
         self.assertEqual(hotkey.modifier_flags, 0x0002 | 0x0001 | 0x0004 | 0x0008)
 
-    def test_invalid_shortcuts_raise_a_dutch_error(self) -> None:
+    def test_invalid_shortcuts_raise_a_readable_error(self) -> None:
         for text in ("alt", "ctrl+shift", "a+b", "ctrl+onbekend"):
             with self.assertRaises(HotkeyError):
                 parse_hotkey(text)
-        with self.assertRaisesRegex(HotkeyError, "Vul eerst"):
+        with self.assertRaisesRegex(HotkeyError, "Enter a shortcut first"):
             parse_hotkey("")
 
 

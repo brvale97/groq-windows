@@ -225,7 +225,7 @@ class StatusBubble(QWidget):
         self.input_notice_timer.setSingleShot(True)
         self.input_notice_timer.setInterval(INPUT_NOTICE_MS)
         self.input_notice_timer.timeout.connect(self.hide_input_notice)
-        self.setWindowTitle(f"{APP_NAME} - Klaar")
+        self.setWindowTitle(f"{APP_NAME} - Ready")
         self.winId()  # Create the native window now so its styles are in place before the first show.
         make_non_activating(self)
 
@@ -308,7 +308,7 @@ class StatusBubble(QWidget):
             self.input_notice_timer.start()
         else:
             self.input_notice_timer.stop()
-        titles = {"idle": "Klaar", "recording": "Opname", "processing": "Transcriptie"}
+        titles = {"idle": "Ready", "recording": "Recording", "processing": "Transcribing"}
         self.setWindowTitle(f"{APP_NAME} - {titles.get(state, titles['idle'])}")
         if state == "idle":
             if schedule_hide:
@@ -419,11 +419,11 @@ class StatusBubble(QWidget):
         if choice is None:
             return "", ""
         name = short_device_name(choice.name) or DEFAULT_DEVICE_LABEL
-        title = f"Overgeschakeld naar {name}"
+        title = f"Switched to {name}"
         if choice.returned:
-            title, detail = f"Terug naar {name}", "Weer verbonden"
+            title, detail = f"Back to {name}", "Reconnected"
         elif choice.lost:
-            detail = f"Verbinding met {short_device_name(choice.lost)} verbroken"
+            detail = f"Lost connection to {short_device_name(choice.lost)}"
         else:
             detail = unavailable_microphones_text(
                 [short_device_name(skipped) for skipped in choice.skipped], connected=choice.skipped_missing,
@@ -570,7 +570,7 @@ class StatusBubble(QWidget):
         painter.setPen(text_color)
         painter.setFont(self._font(10, QFont.Weight.DemiBold))
         painter.drawText(QRectF(ring.right() + 12, pill.top(), pill.width(), pill.height()),
-                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Transcriberen")
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Transcribing")
 
     def _paint_notice(self, painter: QPainter, pill: QRectF, theme) -> None:
         middle = pill.center().y()
@@ -639,13 +639,13 @@ class StartupSplash(QWidget):
         title.setStyleSheet("font-size: 14pt;")
         brand.addWidget(title, 1)
         layout.addLayout(brand)
-        self.status = QLabel("Wordt geladen in het systeemvak...")
+        self.status = QLabel("Loading in the system tray...")
         layout.addWidget(self.status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
         layout.addWidget(self.progress)
-        hint = QLabel("Daarna blijft de app beschikbaar via het icoon rechtsonder.")
+        hint = QLabel("After that, the app stays available from the icon in the bottom-right corner.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -666,7 +666,7 @@ class StartupSplash(QWidget):
             return
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
-        self.status.setText("Klaar — actief in het systeemvak")
+        self.status.setText("Ready — running in the system tray")
 
     def destroy_splash(self) -> None:
         if self.destroyed_flag:
@@ -689,19 +689,19 @@ class UpdateDialog(QDialog):
         super().__init__(None)
         self.app = app
         self.update_info = update
-        self.setWindowTitle("Nieuwe versie beschikbaar")
+        self.setWindowTitle("New version available")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setMinimumWidth(500)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(10)
-        title = QLabel(f"Er is een nieuwe versie beschikbaar: {update.tag}")
+        title = QLabel(f"A new version is available: {update.tag}")
         title.setObjectName("cardTitle")
         title.setStyleSheet("font-size: 13pt;")
         layout.addWidget(title)
         body = QLabel(
-            f"Je gebruikt nu v{APP_VERSION}. Klik op Update om de nieuwe versie te downloaden, "
-            "de app te vervangen en opnieuw te starten. Je Groq API key, instellingen en geschiedenis blijven behouden."
+            f"You are using v{APP_VERSION}. Click Update to download the new version, "
+            "replace the app and restart it. Your Groq API key, settings and history are kept."
         )
         body.setWordWrap(True)
         layout.addWidget(body)
@@ -712,7 +712,7 @@ class UpdateDialog(QDialog):
         buttons.addStretch(1)
         later = QPushButton("Later")
         later.clicked.connect(self.close)
-        self.update_button = QPushButton(f"Update naar {update.tag}")
+        self.update_button = QPushButton(f"Update to {update.tag}")
         self.update_button.setProperty("variant", "primary")
         self.update_button.setDefault(True)
         self.update_button.clicked.connect(self.start_update)
@@ -722,7 +722,7 @@ class UpdateDialog(QDialog):
 
     def start_update(self) -> None:
         self.update_button.setEnabled(False)
-        self.status.setText("Downloaden en controleren...")
+        self.status.setText("Downloading and verifying...")
         update = self.update_info
 
         def run() -> None:
@@ -731,12 +731,12 @@ class UpdateDialog(QDialog):
                 updater.launch_update_script(staged, update.kind)
             except Exception as exc:
                 logging.exception("Update failed")
-                text = f"Update mislukt:\n{exc}"
+                text = f"Update failed:\n{exc}"
 
                 def failed() -> None:
                     try:
                         self.update_button.setEnabled(True)
-                        self.status.setText("Update mislukt.")
+                        self.status.setText("Update failed.")
                     except RuntimeError:
                         pass
                     message("error", text)
@@ -799,14 +799,14 @@ class TrayApp:
             self.tray.activated.connect(self.on_tray_activated)
             self.menu = QMenu()
             for text, action in (
-                ("Instellingen", self.open_settings),
-                ("Geschiedenis", lambda: self.open_settings("history")),
+                ("Settings", self.open_settings),
+                ("History", lambda: self.open_settings("history")),
                 (None, None),
-                ("Controleren op updates", self.check_for_updates_manual),
-                ("Logbestand openen", self.open_log),
-                ("App herstarten", self.restart),
+                ("Check for updates", self.check_for_updates_manual),
+                ("Open log file", self.open_log),
+                ("Restart app", self.restart),
                 (None, None),
-                ("Afsluiten", self.quit),
+                ("Quit", self.quit),
             ):
                 if text is None:
                     self.menu.addSeparator()
@@ -824,19 +824,19 @@ class TrayApp:
 
     def set_engine_state(self, state: str) -> None:
         if state == "too_short":
-            self.bubble.show_notice("Transcriptie te kort")
+            self.bubble.show_notice("Transcript too short")
         elif state == "no_speech":
-            self.bubble.show_notice("Geen spraak gedetecteerd")
+            self.bubble.show_notice("No speech detected")
         elif state == "cleanup_skipped":
-            self.bubble.show_notice("Niet opgeschoond")
+            self.bubble.show_notice("Not cleaned up")
         elif state == "no_microphone":
             self.bubble.show_notice(
-                "Geen microfoon gevonden", "Verbind je headset of sluit een microfoon aan. Klik hier voor Instellingen.",
+                "No microphone found", "Connect your headset or plug in a microphone. Click here for Settings.",
                 glyph="mic-off", visible_ms=NO_MICROPHONE_VISIBLE_MS, opens_microphone_settings=True,
             )
         elif state == "microphone_unavailable":
             self.bubble.show_notice(
-                "Microfoon kon niet worden geopend", "Klik hier om in Instellingen een andere te kiezen.",
+                "Could not open the microphone", "Click here to choose another one in Settings.",
                 glyph="mic-off", visible_ms=NO_MICROPHONE_VISIBLE_MS, opens_microphone_settings=True,
             )
         else:
@@ -897,7 +897,7 @@ class TrayApp:
     def _refresh_inputs_locked(self) -> None:
         # Callers hold both engine locks.
         if self.engine.state != "idle":
-            raise RuntimeError("Stop eerst de opname of microfoontest voordat je apparaten vernieuwt.")
+            raise RuntimeError("Stop the recording or microphone test before refreshing devices.")
         self._reinitialize_portaudio()
 
     def list_input_devices(self, *, refresh: bool = False) -> list[tuple[str, str]]:
@@ -910,7 +910,7 @@ class TrayApp:
             if refresh:
                 raise
             logging.warning("Could not list input devices: %s", exc)
-            return [("", f"{DEFAULT_DEVICE_LABEL} (apparaat niet beschikbaar)")]
+            return [("", f"{DEFAULT_DEVICE_LABEL} (device unavailable)")]
 
     def start_microphone_test(self, selector: str) -> None:
         self.stop_microphone_test()
@@ -932,9 +932,9 @@ class TrayApp:
 
     def play_microphone_test(self) -> float:
         if self.microphone_test is None:
-            raise RuntimeError("Maak eerst een testopname.")
+            raise RuntimeError("Make a test recording first.")
         if self.recording_busy():
-            raise RuntimeError("Wacht tot de opname klaar is.")
+            raise RuntimeError("Wait until the recording has finished.")
         # Never open a stream while a starting dictation resets PortAudio.
         with self.engine.stream_transition_lock:
             return self.player.play(MICROPHONE_TEST_KEY, self.microphone_test.playback_path())
@@ -1014,7 +1014,7 @@ class TrayApp:
     def clear_history(self) -> None:
         with self.engine.lock:
             if self.engine.state != "idle":
-                raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
+                raise RuntimeError("Wait until the current recording or transcription has finished.")
             self.player.release()
             self.recordings.clear()
             self.history.clear()
@@ -1025,8 +1025,8 @@ class TrayApp:
         names = [str(getattr(model, "id", "")) for model in getattr(models, "data", [])]
         whisper = sorted(name for name in names if "whisper" in name.lower())
         if not whisper:
-            return "Verbonden met Groq, maar er is geen Whisper-model beschikbaar voor deze sleutel."
-        return f"Verbonden. Beschikbare spraakmodellen: {', '.join(whisper)}."
+            return "Connected to Groq, but no Whisper model is available for this key."
+        return f"Connected. Available speech models: {', '.join(whisper)}."
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1063,7 +1063,7 @@ class TrayApp:
         ready = self.tray_ready()
         if not ready and elapsed_ms >= SPLASH_TRAY_TIMEOUT_MS:
             self.startup_timer.stop()
-            self._fail_startup(RuntimeError("Het systeemvak kon niet op tijd worden gestart."))
+            self._fail_startup(RuntimeError("The system tray could not be started in time."))
             return
         if ready and self.splash.minimum_time_has_elapsed():
             self.startup_timer.stop()
@@ -1119,13 +1119,13 @@ class TrayApp:
                 logging.warning("Update check failed: %s", exc)
                 if show_no_update:
                     # Bind the message now: `exc` is unbound once the except block ends.
-                    text = f"Update-check mislukt:\n{exc}"
+                    text = f"Update check failed:\n{exc}"
                     self.bridge.run_on_main(lambda: message("error", text))
                 return
 
             if update is None:
                 if show_no_update:
-                    self.bridge.run_on_main(lambda: message("info", f"Je gebruikt de nieuwste versie: v{APP_VERSION}."))
+                    self.bridge.run_on_main(lambda: message("info", f"You are using the latest version: v{APP_VERSION}."))
                 return
 
             self.bridge.run_on_main(lambda: self.show_update_window(update))
@@ -1162,7 +1162,7 @@ class TrayApp:
     def open_log(self) -> None:
         config_store.LOG_PATH.touch(exist_ok=True)
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_store.LOG_PATH))):
-            message("error", f"Logbestand kon niet worden geopend:\n{config_store.LOG_PATH}")
+            message("error", f"Could not open the log file:\n{config_store.LOG_PATH}")
 
     def restart(self) -> None:
         env = os.environ.copy()
@@ -1188,7 +1188,7 @@ class TrayApp:
                 self.install_hotkey()
             except Exception as hotkey_exc:
                 logging.warning("Could not restore hotkey after a failed restart: %s", hotkey_exc)
-            message("error", f"App kon niet worden herstart:\n{exc}")
+            message("error", f"Could not restart the app:\n{exc}")
             return
 
         self.quit()
@@ -1222,7 +1222,7 @@ def main() -> None:
         logging.exception("Fatal startup error")
         try:
             QApplication.instance() or QApplication(sys.argv)
-            message("error", f"Startfout:\n{exc}\n\nLog: {config_store.LOG_PATH}")
+            message("error", f"Startup error:\n{exc}\n\nLog: {config_store.LOG_PATH}")
         except Exception:
             pass
         raise SystemExit(1)

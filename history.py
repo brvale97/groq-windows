@@ -33,16 +33,16 @@ class HistoryEntry:
     created_at: float
 
     def label(self, now: float | None = None) -> str:
-        """Human friendly timestamp such as ``Vandaag 14:02`` or ``ma 8 sep 14:02``."""
+        """Human friendly timestamp such as ``Today 14:02`` or ``Mon 8 Sep 14:02``."""
         moment = datetime.fromtimestamp(self.created_at)
         today = datetime.fromtimestamp(now if now is not None else time.time()).date()
         clock = moment.strftime("%H:%M")
         if moment.date() == today:
-            return f"Vandaag {clock}"
+            return f"Today {clock}"
         if (today - moment.date()).days == 1:
-            return f"Gisteren {clock}"
-        days = ("ma", "di", "wo", "do", "vr", "za", "zo")
-        months = ("jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec")
+            return f"Yesterday {clock}"
+        days = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
         return f"{days[moment.weekday()]} {moment.day} {months[moment.month - 1]} {clock}"
 
     def preview(self, limit: int = 90) -> str:
@@ -174,7 +174,7 @@ class RecordingHistory:
         with self._lock:
             entry = next((entry for entry in self._entries if entry.id == recording_id), None)
             if entry is None or not self.audio_path(entry).is_file():
-                raise RuntimeError("Deze opname is niet meer beschikbaar.")
+                raise RuntimeError("This recording is no longer available.")
             return entry
 
     def audio_path(self, entry: RecordingEntry) -> Path:
@@ -263,7 +263,7 @@ class RecordingHistory:
             error = str(raw.get("error", ""))[:2_000]
             if status == "processing":
                 status = "failed"
-                error = "Vorige transcriptiepoging is onderbroken. Probeer opnieuw."
+                error = "The previous transcription attempt was interrupted. Try again."
             self._entries.append(RecordingEntry(
                 text=str(raw.get("text", ""))[:MAX_ENTRY_CHARACTERS], created_at=created_at,
                 id=path.stem, duration=duration, status=status, error=error,

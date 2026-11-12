@@ -23,14 +23,14 @@ class NetworkTrustContractTests(unittest.TestCase):
 class ExistingUiContractTests(unittest.TestCase):
     def test_existing_status_texts_are_unchanged(self) -> None:
         for snippet in (
-            '"Transcriberen"',
-            'self.bubble.show_notice("Transcriptie te kort")',
+            '"Transcribing"',
+            'self.bubble.show_notice("Transcript too short")',
             'NOTICE_VISIBLE_MS = 3000',
         ):
             self.assertIn(snippet, APP_SOURCE)
         for snippet in (
-            'self.notify("Opname gestopt. Transcriberen...")',
-            'self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")',
+            'self.notify("Recording stopped. Transcribing...")',
+            'self.notify("Ready. Use your shortcut for a new recording.")',
         ):
             self.assertIn(snippet, ENGINE_SOURCE)
 
@@ -38,23 +38,23 @@ class ExistingUiContractTests(unittest.TestCase):
         for label in (
             "Groq API key",
             "Model",
-            "Taal",
+            "Language",
             "Prompt",
             "Shortcut",
-            "Microfoons",
-            "Microfoon toevoegen",
-            "Transcriptie automatisch plakken",
-            "Punt aan het einde verwijderen",
-            "Automatisch alinea's maken",
-            "Start automatisch met Windows",
-            "Microfoon testen",
-            "Terugluisteren",
-            "Vernieuwen",
-            "Annuleren",
-            "Opslaan",
+            "Microphones",
+            "Add microphone",
+            "Paste transcript automatically",
+            "Remove the final period",
+            "Create paragraphs automatically",
+            "Start automatically with Windows",
+            "Test microphone",
+            "Play back",
+            "Refresh",
+            "Cancel",
+            "Save",
         ):
             self.assertIn(f'"{label}"', SETTINGS_SOURCE, label)
-        self.assertNotIn("Geluiden testen", SETTINGS_SOURCE)
+        self.assertNotIn("Test sounds", SETTINGS_SOURCE)
 
     def test_final_period_option_defaults_to_off_and_is_wired(self) -> None:
         config_source = (ROOT / "config_store.py").read_text(encoding="utf-8")
@@ -75,8 +75,8 @@ class ExistingUiContractTests(unittest.TestCase):
 
     def test_startup_splash_waits_for_the_visible_tray_icon(self) -> None:
         for snippet in (
-            '"Wordt geladen in het systeemvak..."',
-            '"Klaar — actief in het systeemvak"',
+            '"Loading in the system tray..."',
+            '"Ready — running in the system tray"',
             'self.tray.show()',
             'QTimer.singleShot(SPLASH_READY_VISIBLE_MS, self._finish_startup)',
             'elapsed_ms >= SPLASH_TRAY_TIMEOUT_MS',
@@ -85,10 +85,10 @@ class ExistingUiContractTests(unittest.TestCase):
             self.assertIn(snippet, APP_SOURCE)
 
     def test_words_and_replacements_live_on_one_dictionary_page(self) -> None:
-        self.assertIn('("dictionary", "Woordenboek"', SETTINGS_SOURCE)
-        self.assertIn('"Woorden",', SETTINGS_SOURCE)
-        self.assertIn('"Vervangingen",', SETTINGS_SOURCE)
-        self.assertNotIn("Woordenboek openen", SETTINGS_SOURCE)
+        self.assertIn('("dictionary", "Dictionary"', SETTINGS_SOURCE)
+        self.assertIn('"Words",', SETTINGS_SOURCE)
+        self.assertIn('"Replacements",', SETTINGS_SOURCE)
+        self.assertNotIn("Open dictionary", SETTINGS_SOURCE)
 
     def test_tkinter_and_pystray_are_gone(self) -> None:
         for source in (APP_SOURCE, ENGINE_SOURCE, SETTINGS_SOURCE):
@@ -107,9 +107,9 @@ class HistoryContractTests(unittest.TestCase):
             body.index("pyperclip.copy(clipboard_text(pasted_text))"),
             body.index("self.transcript_callback(text)"),
         )
-        self.assertIn('("Geschiedenis", lambda: self.open_settings("history"))', APP_SOURCE)
-        self.assertIn('("history", "Geschiedenis"', SETTINGS_SOURCE)
-        self.assertIn('"Kopiëren"', SETTINGS_SOURCE)
+        self.assertIn('("History", lambda: self.open_settings("history"))', APP_SOURCE)
+        self.assertIn('("history", "History"', SETTINGS_SOURCE)
+        self.assertIn('"Copy"', SETTINGS_SOURCE)
 
 
     def test_pasted_text_gets_a_trailing_space_but_history_does_not(self) -> None:

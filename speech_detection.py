@@ -46,7 +46,7 @@ def prepare_speech_detection() -> None:
 
 class NoSpeechDetected(RuntimeError):
     def __init__(self) -> None:
-        super().__init__("Geen spraak gedetecteerd. Er is niets geplakt. Opname bewaard in Geschiedenis.")
+        super().__init__("No speech detected. Nothing was pasted. Recording saved in History.")
 
 
 def _frame_probabilities(path: Path) -> tuple[np.ndarray, int, int, int]:
@@ -59,7 +59,7 @@ def _frame_probabilities(path: Path) -> tuple[np.ndarray, int, int, int]:
     """
     with wave.open(str(path), "rb") as wav:
         if wav.getsampwidth() != 2:
-            raise ValueError("Spraakdetectie vereist 16-bit PCM-audio.")
+            raise ValueError("Speech detection requires 16-bit PCM audio.")
         rate = wav.getframerate()
         channels = wav.getnchannels()
         total = wav.getnframes()

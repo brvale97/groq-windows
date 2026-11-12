@@ -62,28 +62,28 @@ from ui_theme import app_icon, current_theme, draw_glyph, icon, repolish
 __all__ = ["DEFAULT_DEVICE_LABEL", "SettingsController", "SettingsWindow"]
 
 MODEL_OPTIONS = (
-    ("whisper-large-v3-turbo", "Turbo: snelste antwoord, uitstekend voor dagelijks dicteren."),
-    ("whisper-large-v3", "V3: iets trager, hoogste nauwkeurigheid bij moeilijke audio."),
+    ("whisper-large-v3-turbo", "Turbo: fastest response, excellent for everyday dictation."),
+    ("whisper-large-v3", "V3: a bit slower, highest accuracy for difficult audio."),
 )
 CLEANUP_MODEL_OPTIONS = (
-    ("openai/gpt-oss-120b", "GPT-OSS 120B: aanbevolen. Houdt je taal vast en laat opdrachten in je dictaat staan."),
-    ("openai/gpt-oss-20b", "GPT-OSS 20B: iets sneller, maar mist vaker een verbetering en verandert soms woorden."),
+    ("openai/gpt-oss-120b", "GPT-OSS 120B: recommended. Keeps your language and leaves instructions in your dictation alone."),
+    ("openai/gpt-oss-20b", "GPT-OSS 20B: a bit faster, but misses corrections more often and sometimes changes words."),
 )
 LANGUAGE_OPTIONS = (
-    ("nl", "Nederlands"),
-    ("en", "Engels"),
-    ("de", "Duits"),
-    ("fr", "Frans"),
-    ("es", "Spaans"),
-    ("", "Automatisch herkennen"),
+    ("nl", "Dutch"),
+    ("en", "English"),
+    ("de", "German"),
+    ("fr", "French"),
+    ("es", "Spanish"),
+    ("", "Detect automatically"),
 )
 MICROPHONE_TEST_KEY = "microphone-test"
-SHORTCUT_TIP = "Tip: alt+z, ctrl+shift+space of een losse toets zoals insert of f9."
+SHORTCUT_TIP = "Tip: alt+z, ctrl+shift+space or a single key such as insert or f9."
 STATUS_LABELS = {
-    "saved": ("Bewaard", "muted"),
-    "processing": ("Transcriberen…", ""),
-    "done": ("Getranscribeerd", ""),
-    "failed": ("Mislukt", "danger"),
+    "saved": ("Saved", "muted"),
+    "processing": ("Transcribing…", ""),
+    "done": ("Transcribed", ""),
+    "failed": ("Failed", "danger"),
 }
 
 
@@ -335,7 +335,7 @@ class RecordingPlayer(QWidget):
         self.setFixedHeight(34)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName("Opname afspelen")
+        self.setAccessibleName("Play recording")
 
     def _time_text(self) -> str:
         return f"{format_clock(self.position)} / {format_clock(self.duration + 0.5)}"
@@ -434,7 +434,7 @@ class ListEditor(QWidget):
         self.listbox.itemSelectionChanged.connect(self._update_buttons)
         layout.addWidget(self.listbox, 1)
         self.counter = label("", "muted")
-        self.remove_button = button("Verwijderen", variant="ghost", glyph="trash")
+        self.remove_button = button("Remove", variant="ghost", glyph="trash")
         self.remove_button.clicked.connect(self.remove_selected)
         layout.addLayout(hbox(self.counter, None, self.remove_button))
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self.listbox, self.remove_selected, context=Qt.ShortcutContext.WidgetShortcut)
@@ -507,7 +507,7 @@ def hotkey_from_qt_event(event: QKeyEvent) -> str | None:
     )
 
 
-def ask(parent, title: str, question: str, confirm: str, cancel: str = "Annuleren") -> bool:
+def ask(parent, title: str, question: str, confirm: str, cancel: str = "Cancel") -> bool:
     box = QMessageBox(QMessageBox.Icon.Question, title, question, parent=parent)
     yes = box.addButton(confirm, QMessageBox.ButtonRole.AcceptRole)
     box.addButton(cancel, QMessageBox.ButtonRole.RejectRole)
@@ -529,13 +529,13 @@ def show_error(parent, title: str, message: str) -> None:
 
 class SettingsWindow(QWidget):
     PAGES = (
-        ("dictate", "Dicteren", "Jouw stem, direct op de juiste plek.", "mic"),
-        ("history", "Geschiedenis", f"Je laatste {MAX_RECORDING_ENTRIES} opnames en {MAX_HISTORY_ENTRIES} transcripties.", "history"),
-        ("recognition", "Herkenning", "Help Groq jouw taal en context beter te begrijpen.", "sparkles"),
-        ("cleanup", "AI-opschoning", "Haal eh's, herhalingen en verbeteringen uit je tekst.", "wand"),
-        ("dictionary", "Woordenboek", "Eigen namen, vaktermen en vaste correcties.", "book"),
-        ("connection", "Verbinding", "Je Groq API key en het transcriptiemodel.", "key"),
-        ("about", "Over", "Versie, updates en hulpmiddelen.", "info"),
+        ("dictate", "Dictation", "Your voice, right where you need it.", "mic"),
+        ("history", "History", f"Your last {MAX_RECORDING_ENTRIES} recordings and {MAX_HISTORY_ENTRIES} transcripts.", "history"),
+        ("recognition", "Recognition", "Help Groq understand your language and context.", "sparkles"),
+        ("cleanup", "AI cleanup", "Remove ums, repetitions and self-corrections from your text.", "wand"),
+        ("dictionary", "Dictionary", "Names, technical terms and fixed corrections.", "book"),
+        ("connection", "Connection", "Your Groq API key and the transcription model.", "key"),
+        ("about", "About", "Version, updates and tools.", "info"),
     )
     WIDTH = 980
     HEIGHT = 780
@@ -551,7 +551,7 @@ class SettingsWindow(QWidget):
         self.original = controller.config
         self.setObjectName("settingsRoot")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setWindowTitle(f"{controller.app_name} instellingen")
+        self.setWindowTitle(f"{controller.app_name} settings")
         self.setWindowIcon(app_icon())
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
 
@@ -567,7 +567,7 @@ class SettingsWindow(QWidget):
         self.microphone_test_used = False
         self.microphone_test_name = ""
         self._loading = True
-        # Microphones in order of preference; "" is Windows-standaard.
+        # Microphones in order of preference; "" is Windows default.
         self.device_priority: list[str] = list(config.input_devices) or [""]
         self.device_labels: dict[str, str] = {}
         self.default_device_name: str | None = None
@@ -624,7 +624,7 @@ class SettingsWindow(QWidget):
         brand_text = QVBoxLayout()
         brand_text.setSpacing(0)
         brand_text.addWidget(label("Groq Dictation", "brandTitle"))
-        brand_text.addWidget(label("Van stem naar tekst", "brandSubtitle"))
+        brand_text.addWidget(label("From voice to text", "brandSubtitle"))
         brand = QHBoxLayout()
         brand.setSpacing(10)
         brand.addWidget(brand_icon)
@@ -635,7 +635,7 @@ class SettingsWindow(QWidget):
         self.navigation.setSpacing(3)
         side.addLayout(self.navigation)
         side.addStretch(1)
-        side.addWidget(label(f"Versie {self.controller.app_version}", "sideVersion"))
+        side.addWidget(label(f"Version {self.controller.app_version}", "sideVersion"))
         root.addWidget(sidebar)
 
         main = QVBoxLayout()
@@ -658,12 +658,12 @@ class SettingsWindow(QWidget):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(34, 12, 34, 14)
         footer_layout.setSpacing(8)
-        self.status_label = label("Wijzigingen worden bewaard zodra je op Opslaan klikt.", "status", wrap=True)
+        self.status_label = label("Changes are kept once you click Save.", "status", wrap=True)
         self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         footer_layout.addWidget(self.status_label, 1)
-        self.cancel_button = button("Annuleren")
+        self.cancel_button = button("Cancel")
         self.cancel_button.clicked.connect(self.cancel)
-        self.save_button = button("Opslaan", variant="primary", glyph="check")
+        self.save_button = button("Save", variant="primary", glyph="check")
         self.save_button.setDefault(True)
         self.save_button.clicked.connect(self.save)
         footer_layout.addWidget(self.cancel_button)
@@ -733,12 +733,12 @@ class SettingsWindow(QWidget):
         config = self.original
         shortcut_card = Card(
             "Shortcut",
-            "Eenmaal drukken start de opname, nogmaals drukken stopt. De combinatie komt niet in je tekst terecht.",
+            "Press once to start recording, press again to stop. The key combination never ends up in your text.",
         )
         self.shortcut_entry = QLineEdit(config.shortcut)
         self.shortcut_entry.setObjectName("shortcutField")
         self.shortcut_entry.textEdited.connect(lambda _text: self.mark_dirty())
-        self.capture_button = button("Wijzig", glyph="keyboard")
+        self.capture_button = button("Change", glyph="keyboard")
         self.capture_button.clicked.connect(self.toggle_capture)
         row = hbox(self.shortcut_entry, self.capture_button)
         row.setStretch(0, 1)
@@ -748,9 +748,9 @@ class SettingsWindow(QWidget):
         page.addWidget(shortcut_card)
 
         mic_card = Card(
-            "Microfoons",
-            "De app neemt op met de eerste microfoon die verbonden is, van boven naar beneden. "
-            "Bij elke opname kijkt hij opnieuw.",
+            "Microphones",
+            "The app records with the first connected microphone, from top to bottom. "
+            "It checks again for every recording.",
         )
         self.device_note = label("", "micNote", wrap=True)
         self.device_note.setTextFormat(Qt.TextFormat.RichText)
@@ -763,13 +763,13 @@ class SettingsWindow(QWidget):
         self.device_list_layout.setSpacing(0)
         mic_card.body.addWidget(self.device_list)
         self.device_rows: list[QFrame] = []
-        self.add_device_button = button("Microfoon toevoegen", glyph="plus")
+        self.add_device_button = button("Add microphone", glyph="plus")
         self.add_device_menu = QMenu(self.add_device_button)
         self.add_device_menu.aboutToShow.connect(self._prepare_add_device_menu)
         self.add_device_button.setMenu(self.add_device_menu)
-        self.refresh_devices_button = button("Vernieuwen", glyph="refresh")
+        self.refresh_devices_button = button("Refresh", glyph="refresh")
         self.refresh_devices_button.clicked.connect(self.refresh_devices)
-        self.microphone_test_button = button("Microfoon testen", glyph="mic")
+        self.microphone_test_button = button("Test microphone", glyph="mic")
         self.microphone_test_button.clicked.connect(self.toggle_microphone_test)
         mic_card.body.addLayout(hbox(self.add_device_button, self.refresh_devices_button, self.microphone_test_button, None))
 
@@ -780,7 +780,7 @@ class SettingsWindow(QWidget):
         self.microphone_level = QProgressBar()
         self.microphone_level.setRange(0, 100)
         self.microphone_level.setTextVisible(False)
-        self.microphone_listen_button = button("Terugluisteren", variant="ghost", glyph="play")
+        self.microphone_listen_button = button("Play back", variant="ghost", glyph="play")
         self.microphone_listen_button.setEnabled(False)
         self.microphone_listen_button.clicked.connect(self.listen_microphone_test)
         level_row = hbox(self.microphone_level, self.microphone_listen_button, spacing=12)
@@ -792,12 +792,12 @@ class SettingsWindow(QWidget):
         mic_card.body.addWidget(self.microphone_panel)
         page.addWidget(mic_card)
 
-        behaviour_card = Card("Gedrag")
-        self.paste_switch = ToggleSwitch("Transcriptie automatisch plakken", config.paste_after_transcription)
-        self.remove_period_switch = ToggleSwitch("Punt aan het einde verwijderen", config.remove_final_period)
-        self.paragraphs_switch = ToggleSwitch("Automatisch alinea's maken", config.auto_paragraphs)
+        behaviour_card = Card("Behavior")
+        self.paste_switch = ToggleSwitch("Paste transcript automatically", config.paste_after_transcription)
+        self.remove_period_switch = ToggleSwitch("Remove the final period", config.remove_final_period)
+        self.paragraphs_switch = ToggleSwitch("Create paragraphs automatically", config.auto_paragraphs)
         self.autostart_switch = ToggleSwitch(
-            "Start automatisch met Windows", config.autostart or self.controller.autostart_enabled(),
+            "Start automatically with Windows", config.autostart or self.controller.autostart_enabled(),
         )
         for switch in (self.paste_switch, self.remove_period_switch, self.paragraphs_switch, self.autostart_switch):
             switch.toggled.connect(lambda _checked: self.mark_dirty())
@@ -810,15 +810,15 @@ class SettingsWindow(QWidget):
         self.history_tabs.setDocumentMode(True)
         self.recording_scroller, self.recording_host = self._history_list()
         self.history_scroller, self.history_host = self._history_list()
-        self.history_tabs.addTab(self.recording_scroller, icon("mic", "muted", "accent_text"), "Opnames")
-        self.history_tabs.addTab(self.history_scroller, icon("document", "muted", "accent_text"), "Teksten")
+        self.history_tabs.addTab(self.recording_scroller, icon("mic", "muted", "accent_text"), "Recordings")
+        self.history_tabs.addTab(self.history_scroller, icon("document", "muted", "accent_text"), "Transcripts")
         page.addWidget(self.history_tabs, 1)
         note = label(
-            "Opnames blijven ook bij een fout bewaard. De oudste verdwijnen na 20 nieuwe opnames. "
-            "Opnieuw proberen gebruikt je opgeslagen instellingen.",
+            "Recordings are kept even when something fails. The oldest are removed after 20 new recordings. "
+            "Retrying uses your saved settings.",
             "muted", wrap=True,
         )
-        self.clear_history_button = button("Geschiedenis wissen", glyph="trash")
+        self.clear_history_button = button("Clear history", glyph="trash")
         self.clear_history_button.clicked.connect(self.clear_history)
         footer = hbox(note, self.clear_history_button, spacing=16)
         footer.setStretch(0, 1)
@@ -859,8 +859,8 @@ class SettingsWindow(QWidget):
         self._clear_layout(self.history_host)
         if not entries:
             self.history_host.addWidget(Card(
-                "Nog geen transcripties",
-                "Dicteer iets met je shortcut. De tekst verschijnt hier zodra hij is geplakt.",
+                "No transcripts yet",
+                "Dictate something with your shortcut. The text appears here once it has been pasted.",
             ))
         for entry in entries:
             card = QFrame()
@@ -868,7 +868,7 @@ class SettingsWindow(QWidget):
             layout = QVBoxLayout(card)
             layout.setContentsMargins(16, 10, 12, 12)
             layout.setSpacing(6)
-            copy_button = button("Kopiëren", variant="ghost", glyph="copy")
+            copy_button = button("Copy", variant="ghost", glyph="copy")
             copy_button.clicked.connect(lambda _checked=False, e=entry, b=copy_button: self.copy_history_entry(e, b))
             layout.addLayout(hbox(label(entry.label(), "muted"), None, copy_button))
             layout.addWidget(label(self._preview(entry.text), wrap=True, selectable=True))
@@ -887,7 +887,7 @@ class SettingsWindow(QWidget):
             self.stop_recording_playback()
         if not entries:
             self.recording_host.addWidget(Card(
-                "Nog geen opnames", "Nieuwe opnames worden hier bewaard, ook als de transcriptie mislukt.",
+                "No recordings yet", "New recordings are kept here, even when transcription fails.",
             ))
         for entry in entries:
             card = QFrame()
@@ -912,14 +912,14 @@ class SettingsWindow(QWidget):
             grid.addWidget(player, 0, 1)
             grid.setColumnStretch(1, 1)
             self.players[entry.id] = player
-            retry = button("Opnieuw transcriberen", variant="ghost", glyph="retry")
+            retry = button("Transcribe again", variant="ghost", glyph="retry")
             retry.setEnabled(not busy)
             retry.clicked.connect(lambda _checked=False, e=entry: self.retry_recording(e))
             grid.addWidget(retry, 0, 2, Qt.AlignmentFlag.AlignTop)
             row = 1
             if entry.text:
                 grid.addWidget(label(self._preview(entry.text), wrap=True, selectable=True), row, 0, 1, 2)
-                copy = button("Kopiëren", variant="ghost", glyph="copy")
+                copy = button("Copy", variant="ghost", glyph="copy")
                 copy.clicked.connect(lambda _checked=False, e=entry, b=copy: self.copy_history_entry(e, b))
                 grid.addWidget(copy, row, 2, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
                 row += 1
@@ -968,7 +968,7 @@ class SettingsWindow(QWidget):
         try:
             self.controller.play_recording(entry.id, offset)
         except Exception as exc:
-            self.set_status(f"Afspelen mislukt: {exc}")
+            self.set_status(f"Playback failed: {exc}")
             return
         self.playback_positions[entry.id] = offset
         self.playback_timer.start()
@@ -982,7 +982,7 @@ class SettingsWindow(QWidget):
             try:
                 self.controller.stop_playback()
             except Exception as exc:
-                self.set_status(f"Stoppen mislukt: {exc}")
+                self.set_status(f"Stopping failed: {exc}")
         self.playback_timer.stop()
         for recording_id in self.players:
             self.render_player(recording_id)
@@ -1001,48 +1001,48 @@ class SettingsWindow(QWidget):
         try:
             self.controller.retry_recording(entry.id)
         except Exception as exc:
-            self.set_status(f"Opnieuw proberen mislukt: {exc}")
+            self.set_status(f"Retry failed: {exc}")
             return
         self.refresh_history()
-        self.set_status("Opnieuw transcriberen… De tekst komt op je klembord en in Geschiedenis.")
+        self.set_status("Transcribing again… The text goes to your clipboard and History.")
 
     def copy_history_entry(self, entry: HistoryEntry, copy_button: QPushButton) -> None:
         try:
             self.controller.copy_text(entry.text)
         except Exception as exc:
-            self.set_status(f"Kopiëren mislukt: {exc}")
+            self.set_status(f"Copy failed: {exc}")
             return
-        copy_button.setText("Gekopieerd ✓")
-        self.set_status("Transcriptie staat op je klembord.")
+        copy_button.setText("Copied ✓")
+        self.set_status("Transcript copied to your clipboard.")
 
         def restore() -> None:
             try:
-                copy_button.setText("Kopiëren")
+                copy_button.setText("Copy")
             except RuntimeError:
                 pass  # The list was rebuilt meanwhile.
 
         QTimer.singleShot(1500, copy_button, restore)
 
     def clear_history(self) -> None:
-        if not ask(self, self.controller.app_name, "Alle bewaarde opnames en transcripties verwijderen?", "Verwijderen"):
+        if not ask(self, self.controller.app_name, "Delete all saved recordings and transcripts?", "Delete"):
             return
         self.stop_recording_playback()
         try:
             self.controller.clear_history()
         except Exception as exc:
-            self.set_status(f"Geschiedenis wissen mislukt: {exc}")
+            self.set_status(f"Clearing history failed: {exc}")
             self.refresh_history()
             return
         self.playback_positions.clear()
         self.refresh_history()
-        self.set_status("Geschiedenis gewist.")
+        self.set_status("History cleared.")
 
     # -- remaining pages -----------------------------------------------------
 
     def _build_recognition_page(self, page: QVBoxLayout) -> None:
         language_card = Card(
-            "Taal",
-            "Een vaste taal maakt de herkenning sneller en betrouwbaarder. Laat leeg om Groq de taal te laten raden.",
+            "Language",
+            "A fixed language makes recognition faster and more reliable. Leave empty to let Groq detect the language.",
         )
         self.language_combo = ComboBox()
         self.language_combo.setEditable(True)
@@ -1058,12 +1058,12 @@ class SettingsWindow(QWidget):
 
         prompt_card = Card(
             "Prompt",
-            "Optionele context voor Whisper, bijvoorbeeld het onderwerp of de schrijfstijl. "
-            "Prompt en woordenboek delen samen ongeveer 224 tokens.",
+            "Optional context for Whisper, such as the topic or writing style. "
+            "The prompt and dictionary share about 224 tokens.",
         )
         self.prompt_text = QPlainTextEdit(self.original.prompt)
         self.prompt_text.setMinimumHeight(140)
-        self.prompt_text.setPlaceholderText("Bijvoorbeeld: Vergadering over de planning van het project Clinon.")
+        self.prompt_text.setPlaceholderText("For example: Meeting about the planning of the Clinon project.")
         self.prompt_text.textChanged.connect(self._prompt_changed)
         prompt_card.body.addWidget(self.prompt_text, 1)
         self.prompt_counter = label("", "hint")
@@ -1074,17 +1074,17 @@ class SettingsWindow(QWidget):
     def _build_cleanup_page(self, page: QVBoxLayout) -> None:
         config = self.original
         cleanup_card = Card(
-            "AI-opschoning",
-            "Na de transcriptie haalt een taalmodel bij Groq \"eh\", \"uh\" en herhalingen weg, verwerkt "
-            "verbeteringen zoals \"nee wacht, ik bedoel\" en zet de leestekens goed. Je taal blijft behouden. "
-            "Dat kost ongeveer een halve seconde. Lukt het niet, dan krijg je de letterlijke tekst.",
+            "AI cleanup",
+            "After transcription, a language model on Groq removes \"um\", \"uh\" and repetitions, applies "
+            "self-corrections such as \"no wait, I mean\" and fixes punctuation. Your language is kept. "
+            "This takes about half a second. If it fails, you get the literal text.",
         )
-        self.cleanup_switch = ToggleSwitch("AI-opschoning gebruiken", config.cleanup_enabled)
+        self.cleanup_switch = ToggleSwitch("Use AI cleanup", config.cleanup_enabled)
         self.cleanup_switch.toggled.connect(self._cleanup_toggled)
         cleanup_card.body.addWidget(self.cleanup_switch)
         page.addWidget(cleanup_card)
 
-        model_card = Card("Model", "Draait bij Groq met dezelfde API key. Je kunt ook een ander Groq-model-ID invullen.")
+        model_card = Card("Model", "Runs on Groq with the same API key. You can also enter another Groq model ID.")
         self.cleanup_model_combo = ComboBox()
         self.cleanup_model_combo.setEditable(True)
         names = [name for name, _ in CLEANUP_MODEL_OPTIONS]
@@ -1100,16 +1100,16 @@ class SettingsWindow(QWidget):
         page.addWidget(model_card)
 
         prompt_card = Card(
-            "Systeemprompt",
-            "De instructie voor het taalmodel. Je dictaat gaat er apart achteraan, tussen transcript-tags. "
-            "Woorden uit je woordenboek worden automatisch toegevoegd.",
+            "System prompt",
+            "The instruction for the language model. Your dictation is sent separately after it, between transcript tags. "
+            "Words from your dictionary are added automatically.",
         )
         self.cleanup_prompt_text = QPlainTextEdit(config.cleanup_prompt or DEFAULT_CLEANUP_PROMPT)
         self.cleanup_prompt_text.setMinimumHeight(220)
         self.cleanup_prompt_text.textChanged.connect(self._cleanup_prompt_changed)
         prompt_card.body.addWidget(self.cleanup_prompt_text, 1)
         self.cleanup_prompt_status = label("", "hint", wrap=True)
-        self.cleanup_reset_button = button("Standaardprompt herstellen", variant="ghost", glyph="retry")
+        self.cleanup_reset_button = button("Restore default prompt", variant="ghost", glyph="retry")
         self.cleanup_reset_button.clicked.connect(lambda: self.cleanup_prompt_text.setPlainText(DEFAULT_CLEANUP_PROMPT))
         row = hbox(self.cleanup_prompt_status, self.cleanup_reset_button, spacing=12)
         row.setStretch(0, 1)
@@ -1122,36 +1122,36 @@ class SettingsWindow(QWidget):
     def _build_dictionary_page(self, page: QVBoxLayout) -> None:
         columns = QHBoxLayout()
         columns.setSpacing(12)
-        words_card = Card("Woorden", "Namen en vaktermen die Groq als spellinghint meekrijgt, zoals Groq of Clinon.")
+        words_card = Card("Words", "Names and technical terms Groq receives as spelling hints, such as Groq or Clinon.")
         self.word_entry = QLineEdit()
-        self.word_entry.setPlaceholderText("Nieuw woord")
+        self.word_entry.setPlaceholderText("New word")
         self.word_entry.returnPressed.connect(self.add_word)
-        add_word = button("Toevoegen", glyph="plus")
+        add_word = button("Add", glyph="plus")
         add_word.clicked.connect(self.add_word)
         row = hbox(self.word_entry, add_word)
         row.setStretch(0, 1)
         words_card.body.addLayout(row)
         self.words_editor = ListEditor(
-            self.custom_words, str, lambda count: f"{count} van {MAX_CUSTOM_WORDS} woorden", self.mark_dirty,
+            self.custom_words, str, lambda count: f"{count} of {MAX_CUSTOM_WORDS} words", self.mark_dirty,
         )
         words_card.body.addWidget(self.words_editor, 1)
         columns.addWidget(words_card, 1)
 
         replacements_card = Card(
-            "Vervangingen", "Vaste correcties die na de transcriptie worden toegepast, bijvoorbeeld Grok → Groq.",
+            "Replacements", "Fixed corrections applied after transcription, for example Grok → Groq.",
         )
         form = QGridLayout()
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(6)
         self.source_entry = QLineEdit()
-        self.source_entry.setPlaceholderText("Bijvoorbeeld Grok")
+        self.source_entry.setPlaceholderText("For example Grok")
         self.target_entry = QLineEdit()
-        self.target_entry.setPlaceholderText("Bijvoorbeeld Groq")
-        form.addWidget(label("Verkeerd"), 0, 0)
+        self.target_entry.setPlaceholderText("For example Groq")
+        form.addWidget(label("Wrong"), 0, 0)
         form.addWidget(self.source_entry, 0, 1)
         form.addWidget(label("Correct"), 1, 0)
         form.addWidget(self.target_entry, 1, 1)
-        add_replacement = button("Toevoegen", glyph="plus")
+        add_replacement = button("Add", glyph="plus")
         add_replacement.clicked.connect(self.add_replacement)
         form.addWidget(add_replacement, 2, 1, Qt.AlignmentFlag.AlignRight)
         form.setColumnStretch(1, 1)
@@ -1160,7 +1160,7 @@ class SettingsWindow(QWidget):
         replacements_card.body.addLayout(form)
         self.replacements_editor = ListEditor(
             self.word_replacements, lambda pair: f"{pair[0]}  →  {pair[1]}",
-            lambda count: f"{count} van {MAX_WORD_REPLACEMENTS} vervangingen", self.mark_dirty,
+            lambda count: f"{count} of {MAX_WORD_REPLACEMENTS} replacements", self.mark_dirty,
         )
         replacements_card.body.addWidget(self.replacements_editor, 1)
         columns.addWidget(replacements_card, 1)
@@ -1169,18 +1169,18 @@ class SettingsWindow(QWidget):
     def _build_connection_page(self, page: QVBoxLayout) -> None:
         key_card = Card(
             "Groq API key",
-            "Maak een sleutel aan op console.groq.com/keys. De sleutel wordt veilig opgeslagen in Windows Credential Manager.",
+            "Create a key at console.groq.com/keys. The key is stored securely in Windows Credential Manager.",
         )
         self.api_key_entry = QLineEdit(self.original.api_key)
         self.api_key_entry.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_entry.setPlaceholderText("gsk_…")
         self.api_key_entry.textEdited.connect(lambda _text: self.mark_dirty())
-        self.reveal_button = button("Tonen", glyph="eye")
+        self.reveal_button = button("Show", glyph="eye")
         self.reveal_button.clicked.connect(self.toggle_api_key_visibility)
         row = hbox(self.api_key_entry, self.reveal_button)
         row.setStretch(0, 1)
         key_card.body.addLayout(row)
-        self.test_button = button("Verbinding testen", variant="ghost", glyph="refresh")
+        self.test_button = button("Test connection", variant="ghost", glyph="refresh")
         self.test_button.clicked.connect(self.test_connection)
         self.connection_result = label("", "hint", wrap=True)
         result_row = hbox(self.test_button, self.connection_result, spacing=12)
@@ -1188,7 +1188,7 @@ class SettingsWindow(QWidget):
         key_card.body.addLayout(result_row)
         page.addWidget(key_card)
 
-        model_card = Card("Model", "Beide modellen draaien bij Groq. Wissel gerust; je instellingen blijven verder gelijk.")
+        model_card = Card("Model", "Both models run on Groq. Feel free to switch; your other settings stay the same.")
         self.model_combo = ComboBox()
         names = [name for name, _ in MODEL_OPTIONS]
         if self.original.model not in names:
@@ -1207,29 +1207,29 @@ class SettingsWindow(QWidget):
     def _build_about_page(self, page: QVBoxLayout) -> None:
         version_card = Card(
             f"{self.controller.app_name} {self.controller.app_version}",
-            "Dicteer overal in Windows met Groq Whisper. Updates vervangen alleen de app; je sleutel, instellingen "
-            "en geschiedenis blijven staan.",
+            "Dictate anywhere in Windows with Groq Whisper. Updates only replace the app; your key, settings "
+            "and history stay in place.",
         )
-        update_button = button("Controleren op updates", glyph="download")
+        update_button = button("Check for updates", glyph="download")
         update_button.clicked.connect(self.controller.check_for_updates_manual)
         version_card.body.addLayout(hbox(update_button, None))
         page.addWidget(version_card)
 
-        tools_card = Card("Hulpmiddelen", "Handig als iets niet doet wat je verwacht.")
-        log_button = button("Logbestand openen", glyph="document")
+        tools_card = Card("Tools", "Useful when something does not work as expected.")
+        log_button = button("Open log file", glyph="document")
         log_button.clicked.connect(self.controller.open_log)
-        restart_button = button("App herstarten", glyph="power")
+        restart_button = button("Restart app", glyph="power")
         restart_button.clicked.connect(self.controller.restart)
         tools_card.body.addLayout(hbox(log_button, restart_button, None))
         tools_card.body.addWidget(label(
-            f"Instellingen en logboek staan in {self.controller.app_dir}", "hint", wrap=True, selectable=True,
+            f"Settings and log are stored in {self.controller.app_dir}", "hint", wrap=True, selectable=True,
         ))
         page.addWidget(tools_card)
 
         credits = Card(
-            "Over deze app",
-            "Gebouwd met Python en Qt for Python (PySide6), gebruikt onder de LGPLv3. "
-            "De licentieteksten staan in de map licenses naast de app.",
+            "About this app",
+            "Built with Python and Qt for Python (PySide6), used under the LGPLv3. "
+            "The license texts are in the licenses folder next to the app.",
         )
         page.addWidget(credits)
         page.addStretch(1)
@@ -1240,7 +1240,7 @@ class SettingsWindow(QWidget):
         if self._loading or self.dirty:
             return
         self.dirty = True
-        self.set_status("Je hebt niet-opgeslagen wijzigingen.", dirty_style=True)
+        self.set_status("You have unsaved changes.", dirty_style=True)
 
     def set_status(self, message: str, *, dirty_style: bool | None = None) -> None:
         self.status_label.setText(message)
@@ -1257,7 +1257,7 @@ class SettingsWindow(QWidget):
 
     def _update_prompt_counter(self) -> None:
         length = len(self.prompt_value())
-        self.prompt_counter.setText(f"{length} tekens" if length else "Nog geen prompt ingesteld.")
+        self.prompt_counter.setText(f"{length} characters" if length else "No prompt set yet.")
 
     def _cleanup_toggled(self, checked: bool) -> None:
         for widget in (self.cleanup_model_combo, self.cleanup_prompt_text, self.cleanup_reset_button):
@@ -1271,7 +1271,7 @@ class SettingsWindow(QWidget):
     def _update_cleanup_model_hint(self) -> None:
         name = self.cleanup_model_combo.currentText().strip()
         self.cleanup_model_hint.setText(
-            dict(CLEANUP_MODEL_OPTIONS).get(name, "Eigen model: vul het model-ID in zoals Groq het noemt.")
+            dict(CLEANUP_MODEL_OPTIONS).get(name, "Custom model: enter the model ID as Groq names it.")
         )
 
     def cleanup_prompt_value(self) -> str:
@@ -1284,9 +1284,9 @@ class SettingsWindow(QWidget):
     def _update_cleanup_prompt_status(self) -> None:
         prompt = self.cleanup_prompt_value()
         if not prompt or prompt == DEFAULT_CLEANUP_PROMPT:
-            text = "Standaardprompt." if prompt else "Leeg: de standaardprompt wordt gebruikt."
+            text = "Default prompt." if prompt else "Empty: the default prompt is used."
         else:
-            text = f"Eigen prompt, {len(prompt)} van {MAX_CLEANUP_PROMPT_LENGTH} tekens."
+            text = f"Custom prompt, {len(prompt)} of {MAX_CLEANUP_PROMPT_LENGTH} characters."
         self.cleanup_prompt_status.setText(text)
         self.cleanup_reset_button.setVisible(bool(prompt) and prompt != DEFAULT_CLEANUP_PROMPT)
 
@@ -1298,9 +1298,9 @@ class SettingsWindow(QWidget):
         code = self.language_combo.currentText().strip().lower()
         names = dict(LANGUAGE_OPTIONS)
         if code in names:
-            self.language_hint.setText(names[code] if code else "Automatisch herkennen (iets trager).")
+            self.language_hint.setText(names[code] if code else "Detect automatically (a bit slower).")
         else:
-            self.language_hint.setText("ISO-taalcode, bijvoorbeeld nl, en of de.")
+            self.language_hint.setText("ISO language code, for example nl, en or de.")
 
     def _model_changed(self, _text: str) -> None:
         self._update_model_hint()
@@ -1312,7 +1312,7 @@ class SettingsWindow(QWidget):
     # -- microphones ---------------------------------------------------------
 
     def _load_devices(self, options: list[tuple[str, str]]) -> None:
-        """Connected microphones from the controller: ("", "Windows-standaard: …") first."""
+        """Connected microphones from the controller: ("", "Windows default: …") first."""
         self.device_labels = {device_id: text for device_id, text in options if device_id}
         default_label = next((text for device_id, text in options if not device_id), "")
         prefix = f"{DEFAULT_DEVICE_LABEL}: "
@@ -1328,7 +1328,7 @@ class SettingsWindow(QWidget):
         return bool(self.default_device_name) if not selector else selector in self.device_labels
 
     def active_device_id(self) -> str | None:
-        """The list entry the next recording would use ("" is Windows-standaard), or None."""
+        """The list entry the next recording would use ("" is Windows default), or None."""
         return next((selector for selector in self.device_priority if self.device_available(selector)), None)
 
     def _render_devices(self) -> None:
@@ -1339,27 +1339,27 @@ class SettingsWindow(QWidget):
         for index, selector in enumerate(self.device_priority):
             available = self.device_available(selector)
             if selector == active:
-                status = ("In gebruik", "active")
+                status = ("In use", "active")
             elif available:
-                status = ("Beschikbaar", "")
+                status = ("Available", "")
             else:
-                status = ("Niet verbonden", "danger")
+                status = ("Not connected", "danger")
             detail = ""
             if not selector:
-                detail = (f"Volgt Windows · nu: {self.default_device_name}" if self.default_device_name
-                          else "Volgt Windows · nu: geen microfoon")
+                detail = (f"Follows Windows · now: {self.default_device_name}" if self.default_device_name
+                          else "Follows Windows · now: no microphone")
             row = self._device_row(str(index + 1), self.device_name(selector), detail, status, first=index == 0)
             row.setProperty("missing", "false" if available else "true")
-            row.up_button = icon_button("chevron-up", "Omhoog")
+            row.up_button = icon_button("chevron-up", "Move up")
             row.up_button.setEnabled(editable and index > 0)
             row.up_button.clicked.connect(lambda _checked=False, i=index: self.move_device(i, -1))
-            row.down_button = icon_button("chevron-down", "Omlaag")
+            row.down_button = icon_button("chevron-down", "Move down")
             row.down_button.setEnabled(editable and index < len(self.device_priority) - 1)
             row.down_button.clicked.connect(lambda _checked=False, i=index: self.move_device(i, 1))
             # The list is never empty: the app needs at least one microphone to try.
             last = len(self.device_priority) == 1
             row.remove_button = icon_button(
-                "close", "Er moet minstens één microfoon in de lijst staan" if last else "Verwijderen",
+                "close", "The list needs at least one microphone" if last else "Remove",
             )
             row.remove_button.setEnabled(editable and not last)
             row.remove_button.clicked.connect(lambda _checked=False, i=index: self.remove_device(i))
@@ -1400,8 +1400,8 @@ class SettingsWindow(QWidget):
     def _update_device_note(self, active: str | None) -> None:
         if active is None:
             text, tone = (
-                "<b>Geen microfoon gevonden.</b> Verbind je headset of sluit een microfoon aan en klik op Vernieuwen, "
-                "of voeg een andere microfoon toe.",
+                "<b>No microphone found.</b> Connect your headset or plug in a microphone and click Refresh, "
+                "or add another microphone.",
                 "danger",
             )
         else:
@@ -1412,7 +1412,7 @@ class SettingsWindow(QWidget):
                 return
             name = short_device_name(self.device_name(active) if active else self.default_device_name or "")
             text = (f"<b>{html.escape(unavailable_microphones_text(skipped))}.</b> "
-                    f"De app gebruikt nu prioriteit {position + 1}: {html.escape(name)}.")
+                    f"The app now uses priority {position + 1}: {html.escape(name)}.")
             tone = "warning"
         self.device_note.setText(text)
         self.device_note.setProperty("tone", tone)
@@ -1422,7 +1422,7 @@ class SettingsWindow(QWidget):
     def addable_devices(self) -> list[tuple[str, str]]:
         options = [(device_id, text) for device_id, text in self.device_labels.items() if device_id not in self.device_priority]
         if "" not in self.device_priority:
-            options.append(("", f"{DEFAULT_DEVICE_LABEL} (volgt de microfoon die in Windows is ingesteld)"))
+            options.append(("", f"{DEFAULT_DEVICE_LABEL} (follows the microphone set in Windows)"))
         return options
 
     def _prepare_add_device_menu(self) -> None:
@@ -1430,14 +1430,14 @@ class SettingsWindow(QWidget):
         self.refresh_devices()
         menu = self.add_device_menu
         menu.clear()
-        menu.addAction("Aangesloten microfoons").setEnabled(False)
+        menu.addAction("Connected microphones").setEnabled(False)
         addable = self.addable_devices()
         for device_id, text in addable:
             menu.addAction(text, lambda selector=device_id: self.add_device(selector))
         if not addable:
-            menu.addAction("Alle aangesloten microfoons staan al in de lijst.").setEnabled(False)
+            menu.addAction("All connected microphones are already in the list.").setEnabled(False)
         menu.addSeparator()
-        menu.addAction("Headset niet in de lijst? Verbind hem eerst; Windows toont alleen verbonden microfoons.").setEnabled(False)
+        menu.addAction("Headset not in the list? Connect it first; Windows only shows connected microphones.").setEnabled(False)
 
     def add_device(self, selector: str) -> None:
         if selector not in self.device_priority:
@@ -1472,10 +1472,10 @@ class SettingsWindow(QWidget):
         try:
             options = self.controller.list_input_devices(refresh=True)
         except Exception as exc:
-            self.set_status(f"Microfoons vernieuwen mislukt: {exc}")
+            self.set_status(f"Refreshing microphones failed: {exc}")
             return
         self._load_devices(options)
-        self.set_status(f"{max(0, len(options) - 1)} microfoon(s) gevonden.", dirty_style=self.dirty)
+        self.set_status(f"{max(0, len(options) - 1)} microphone(s) found.", dirty_style=self.dirty)
 
     def toggle_microphone_test(self) -> None:
         if self.microphone_test_active:
@@ -1491,14 +1491,14 @@ class SettingsWindow(QWidget):
         self.microphone_test_used = True
         selector = self.active_device_id()
         if selector is None:
-            self.microphone_result_label.setText("Geen microfoon gevonden. Verbind je headset of sluit een microfoon aan.")
+            self.microphone_result_label.setText("No microphone found. Connect your headset or plug in a microphone.")
             return
         name = self.device_name(selector) if selector else self.default_device_name or ""
         self.microphone_test_name = short_device_name(name)
         try:
             self.controller.start_microphone_test(selector)
         except Exception as exc:
-            self.microphone_result_label.setText(f"Microfoon kon niet worden geopend: {exc}")
+            self.microphone_result_label.setText(f"Could not open the microphone: {exc}")
             return
         self.microphone_test_active = True
         self.microphone_test_button.setText("Stop test")
@@ -1513,28 +1513,28 @@ class SettingsWindow(QWidget):
         if status.state in ("opening", "recording"):
             name = self.microphone_test_name
             self.microphone_result_label.setText(
-                f"{name} openen…" if status.state == "opening"
-                else f"Zeg een paar woorden in {name} en klik op Stop test. "
-                     f"{min(status.elapsed, status.duration):.1f} s (stopt vanzelf na {status.duration:.0f} s)"
+                f"Opening {name}…" if status.state == "opening"
+                else f"Say a few words into {name} and click Stop test. "
+                     f"{min(status.elapsed, status.duration):.1f} s (stops automatically after {status.duration:.0f} s)"
             )
             return
         self.microphone_timer.stop()
         self.microphone_test_button.setEnabled(True)
         self.microphone_test_active = False
-        self.microphone_test_button.setText("Opnieuw testen")
+        self.microphone_test_button.setText("Test again")
         self.microphone_test_button.setIcon(icon("mic"))
         self._set_device_editing(True)
         self.microphone_level.setValue(0)
         if status.state == "ready":
             self.microphone_listen_button.setEnabled(True)
             self.microphone_result_label.setText(
-                "Geluid ontvangen. Luister je testopname terug."
-                if status.heard_audio else "Geen geluid gemeten. Controleer aansluiting, dempen en microfoonvolume."
+                "Sound received. Play back your test recording."
+                if status.heard_audio else "No sound measured. Check the connection, mute and microphone volume."
             )
         elif status.state == "error":
-            self.microphone_result_label.setText(f"Microfoontest mislukt: {status.error}")
+            self.microphone_result_label.setText(f"Microphone test failed: {status.error}")
         else:
-            self.microphone_result_label.setText("Test gestopt.")
+            self.microphone_result_label.setText("Test stopped.")
 
     def listen_microphone_test(self) -> None:
         if self.microphone_playback_timer.isActive():
@@ -1544,9 +1544,9 @@ class SettingsWindow(QWidget):
         try:
             self.controller.play_microphone_test()
         except Exception as exc:
-            self.microphone_result_label.setText(f"Terugluisteren mislukt: {exc}")
+            self.microphone_result_label.setText(f"Playback failed: {exc}")
             return
-        self.microphone_listen_button.setText("Stop afspelen")
+        self.microphone_listen_button.setText("Stop playback")
         self.microphone_listen_button.setIcon(icon("pause", "accent_text", "accent_text"))
         self.microphone_playback_timer.start()
 
@@ -1557,7 +1557,7 @@ class SettingsWindow(QWidget):
 
     def _reset_microphone_listen_button(self) -> None:
         self.microphone_playback_timer.stop()
-        self.microphone_listen_button.setText("Terugluisteren")
+        self.microphone_listen_button.setText("Play back")
         self.microphone_listen_button.setIcon(icon("play", "accent_text", "accent_text"))
 
     def _stop_microphone_playback(self) -> None:
@@ -1574,7 +1574,7 @@ class SettingsWindow(QWidget):
             self.controller.stop_microphone_test()
         self.microphone_test_active = False
         self.microphone_test_used = False
-        self.microphone_test_button.setText("Microfoon testen")
+        self.microphone_test_button.setText("Test microphone")
         self.microphone_test_button.setIcon(icon("mic"))
         self.microphone_listen_button.setEnabled(False)
         self._set_device_editing(True)
@@ -1593,13 +1593,13 @@ class SettingsWindow(QWidget):
         try:
             self.controller.suspend_hotkey()
         except Exception as exc:  # pragma: no cover - defensive
-            self.set_status(f"Kon de huidige shortcut niet pauzeren: {exc}")
-        self.capture_button.setText("Luistert…")
+            self.set_status(f"Could not pause the current shortcut: {exc}")
+        self.capture_button.setText("Listening…")
         self.shortcut_entry.setReadOnly(True)
         self.shortcut_entry.setProperty("capturing", "true")
         repolish(self.shortcut_entry)
-        self.shortcut_hint.setText("Druk nu de gewenste toetscombinatie. Esc annuleert.")
-        self.set_status("Druk nu op de gewenste shortcut. Esc annuleert.")
+        self.shortcut_hint.setText("Press the key combination you want. Esc cancels.")
+        self.set_status("Press the shortcut you want. Esc cancels.")
         self.activateWindow()
         self.shortcut_entry.setFocus()
 
@@ -1614,7 +1614,7 @@ class SettingsWindow(QWidget):
         self.stop_capture(cancelled=False)
         self.shortcut_entry.setText(value)
         self.mark_dirty()
-        self.set_status(f"Shortcut ingesteld op {value}. Klik op Opslaan om te bewaren.")
+        self.set_status(f"Shortcut set to {value}. Click Save to keep it.")
         return True
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
@@ -1628,7 +1628,7 @@ class SettingsWindow(QWidget):
 
     def stop_capture(self, *, cancelled: bool) -> None:
         self.capturing = False
-        self.capture_button.setText("Wijzig")
+        self.capture_button.setText("Change")
         self.shortcut_entry.setReadOnly(False)
         self.shortcut_entry.setProperty("capturing", "false")
         repolish(self.shortcut_entry)
@@ -1636,10 +1636,10 @@ class SettingsWindow(QWidget):
         try:
             self.controller.resume_hotkey()
         except Exception as exc:
-            self.set_status(f"Kon de oude shortcut niet terugzetten: {exc}")
+            self.set_status(f"Could not restore the previous shortcut: {exc}")
             return
         if cancelled:
-            self.set_status("Shortcut wijzigen geannuleerd.")
+            self.set_status("Shortcut change canceled.")
 
     def _save_shortcut(self) -> None:
         if not self.capturing:
@@ -1655,7 +1655,7 @@ class SettingsWindow(QWidget):
         try:
             word = normalize_custom_word(self.word_entry.text())
             if any(existing.casefold() == word.casefold() for existing in self.custom_words):
-                raise DictionaryValidationError(f"'{word}' staat al in het woordenboek.")
+                raise DictionaryValidationError(f"'{word}' is already in the dictionary.")
             candidate = normalize_custom_words([*self.custom_words, word])
             compose_transcription_prompt(self.prompt_value(), candidate)
         except DictionaryValidationError as exc:
@@ -1667,11 +1667,11 @@ class SettingsWindow(QWidget):
 
     def add_replacement(self) -> None:
         try:
-            source = normalize_replacement_part(self.source_entry.text(), "verkeerd herkende")
-            target = normalize_replacement_part(self.target_entry.text(), "correcte")
+            source = normalize_replacement_part(self.source_entry.text(), "misrecognized")
+            target = normalize_replacement_part(self.target_entry.text(), "correct")
             candidate = normalize_word_replacements([*self.word_replacements, (source, target)])
             if len(candidate) == len(self.word_replacements):
-                raise DictionaryValidationError(f"Voor '{source}' bestaat al een vervanging.")
+                raise DictionaryValidationError(f"A replacement for '{source}' already exists.")
         except DictionaryValidationError as exc:
             show_error(self, self.controller.app_name, str(exc))
             return
@@ -1685,7 +1685,7 @@ class SettingsWindow(QWidget):
     def toggle_api_key_visibility(self) -> None:
         self.api_key_visible = not self.api_key_visible
         self.api_key_entry.setEchoMode(QLineEdit.EchoMode.Normal if self.api_key_visible else QLineEdit.EchoMode.Password)
-        self.reveal_button.setText("Verbergen" if self.api_key_visible else "Tonen")
+        self.reveal_button.setText("Hide" if self.api_key_visible else "Show")
         self.reveal_button.setIcon(icon("eye-off" if self.api_key_visible else "eye"))
 
     def _set_connection_result(self, message: str, tone: str) -> None:
@@ -1696,16 +1696,16 @@ class SettingsWindow(QWidget):
     def test_connection(self) -> None:
         api_key = self.api_key_entry.text().strip()
         if not api_key:
-            self._set_connection_result("Vul eerst een API key in.", "danger")
+            self._set_connection_result("Enter an API key first.", "danger")
             return
         self.test_button.setEnabled(False)
-        self._set_connection_result("Verbinden met Groq…", "hint")
+        self._set_connection_result("Connecting to Groq…", "hint")
 
         def run() -> None:
             try:
                 message, ok = self.controller.test_api_key(api_key), True
             except Exception as exc:
-                message, ok = f"Verbinding mislukt: {exc}", False
+                message, ok = f"Connection failed: {exc}", False
             try:
                 self._connection_result.emit(message, ok)
             except RuntimeError:
@@ -1761,7 +1761,7 @@ class SettingsWindow(QWidget):
             show_error(self, self.controller.app_name, str(exc))
             return
         except Exception as exc:
-            show_error(self, self.controller.app_name, f"Instellingen zijn ongeldig:\n{exc}")
+            show_error(self, self.controller.app_name, f"Invalid settings:\n{exc}")
             return
 
         try:
@@ -1772,14 +1772,14 @@ class SettingsWindow(QWidget):
             self.original = self.controller.config
             self.dirty = normalize_hotkey_text(self.shortcut_entry.text()) != self.original.shortcut
             if self.dirty:
-                self.set_status("Alleen de shortcut is niet opgeslagen.", dirty_style=True)
+                self.set_status("Only the shortcut was not saved.", dirty_style=True)
             else:
-                self.set_status("Instellingen zijn opgeslagen.", dirty_style=False)
+                self.set_status("Settings saved.", dirty_style=False)
             self.select_page("dictate")
             show_error(self, self.controller.app_name, str(exc))
             return
         except Exception as exc:
-            show_error(self, self.controller.app_name, f"Instellingen konden niet worden opgeslagen:\n{exc}")
+            show_error(self, self.controller.app_name, f"Could not save settings:\n{exc}")
             return
 
         self.dirty = False
@@ -1807,7 +1807,7 @@ class SettingsWindow(QWidget):
             self.stop_capture(cancelled=True)
         if self.dirty and not ask(
             self, self.controller.app_name,
-            "Je hebt wijzigingen die nog niet zijn opgeslagen. Wil je ze verwerpen?", "Verwerpen", "Blijven",
+            "You have changes that have not been saved yet. Do you want to discard them?", "Discard", "Keep editing",
         ):
             event.ignore()
             return

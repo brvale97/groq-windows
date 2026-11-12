@@ -141,7 +141,7 @@ def _download(url: str, destination: Path) -> str:
             output.flush()
             os.fsync(output.fileno())
         if expected_length is not None and downloaded != int(expected_length):
-            raise RuntimeError(f"Onvolledige update-download: {downloaded} van {expected_length} bytes ontvangen.")
+            raise RuntimeError(f"Incomplete update download: received {downloaded} of {expected_length} bytes.")
         os.replace(partial, destination)
     finally:
         partial.unlink(missing_ok=True)
@@ -153,7 +153,7 @@ def _expected_hash(update: UpdateInfo) -> str:
         return ""
     manifest = _get_json(update.manifest_url, 20)
     if str(manifest.get("version", "")).lstrip("v") not in {"", update.version}:
-        raise RuntimeError("Het updatemanifest hoort bij een andere versie.")
+        raise RuntimeError("The update manifest belongs to a different version.")
     return str(manifest.get("zip_sha256" if update.kind == "folder" else "exe_sha256", "")).lower()
 
 
@@ -172,7 +172,7 @@ def extract_folder_build(archive: Path, staging: Path) -> Path:
         for member in bundle.infolist():
             target = (staging / member.filename).resolve()
             if target != root and root not in target.parents:
-                raise RuntimeError("Het updatebestand bevat een ongeldig pad.")
+                raise RuntimeError("The update file contains an invalid path.")
         bundle.extractall(staging)
     # Accept both a flat zip and one wrapped in a top-level folder.
     candidates = [staging, staging / APP_SLUG]
@@ -181,7 +181,7 @@ def extract_folder_build(archive: Path, staging: Path) -> Path:
             if not _is_windows_executable(folder / EXE_NAME):
                 break
             return folder
-    raise RuntimeError("Het updatebestand bevat geen geldige Windows-app.")
+    raise RuntimeError("The update file does not contain a valid Windows app.")
 
 
 def download_update(update: UpdateInfo) -> Path:
@@ -194,7 +194,7 @@ def download_update(update: UpdateInfo) -> Path:
         actual = _download(update.download_url, archive)
         try:
             if expected and actual != expected:
-                raise RuntimeError("De controlesom van de update klopt niet.")
+                raise RuntimeError("The update checksum does not match.")
             # Stage beside the installed app, so swapping is a same-volume rename.
             staging = current_exe_path().parent / f".staged-{update.tag}"
             return extract_folder_build(archive, staging)
@@ -205,7 +205,7 @@ def download_update(update: UpdateInfo) -> Path:
     actual = _download(update.download_url, destination)
     if (expected and actual != expected) or not _is_windows_executable(destination):
         destination.unlink(missing_ok=True)
-        raise RuntimeError("Het gedownloade updatebestand is geen geldige Windows-app.")
+        raise RuntimeError("The downloaded update file is not a valid Windows app.")
     return destination
 
 

@@ -63,7 +63,7 @@ $targetFile = Join-Path $Out 'target.txt'
 $targetScript = Join-Path $Out 'target.ps1'
 @"
 Add-Type -AssemblyName System.Windows.Forms
-`$f = New-Object Windows.Forms.Form; `$f.Text = 'Groq E2E doelvenster'; `$f.Width = 700; `$f.Height = 240; `$f.StartPosition = 'Manual'; `$f.Left = 80; `$f.Top = 80
+`$f = New-Object Windows.Forms.Form; `$f.Text = 'Groq E2E target window'; `$f.Width = 700; `$f.Height = 240; `$f.StartPosition = 'Manual'; `$f.Left = 80; `$f.Top = 80
 `$t = New-Object Windows.Forms.TextBox; `$t.Multiline = `$true; `$t.Dock = 'Fill'; `$t.Font = New-Object Drawing.Font('Segoe UI', 12); `$f.Controls.Add(`$t)
 `$timer = New-Object Windows.Forms.Timer; `$timer.Interval = 150; `$timer.Add_Tick({ [IO.File]::WriteAllText('$targetFile', `$t.Text) }); `$timer.Start()
 `$f.Add_Shown({ `$t.Focus() }); [Windows.Forms.Application]::Run(`$f)
@@ -75,7 +75,7 @@ New-Item -ItemType Directory -Path $profileDir | Out-Null
 '{"shortcut": "ctrl+alt+shift+f24", "autostart": false, "input_device": "", "language": "nl"}' | Set-Content -LiteralPath "$profileDir\settings.json" -Encoding ASCII
 $target = Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$targetScript -PassThru -WindowStyle Normal
 $env:GROQ_DICTATION_PROFILE = 'qa'
-$env:GROQ_DICTATION_QA_TRANSCRIPTS = 'Eerste dictaat via sneltoets.|Tweede dictaat, gestopt met de bubbel.'
+$env:GROQ_DICTATION_QA_TRANSCRIPTS = 'First dictation via shortcut.|Second dictation, stopped with the bubble.'
 $appProcess = $null
 function Wait-Until([scriptblock]$Condition, [double]$Seconds) {
     $deadline = (Get-Date).AddSeconds($Seconds)
@@ -85,7 +85,7 @@ function Wait-Until([scriptblock]$Condition, [double]$Seconds) {
 function Log-Has([string]$Pattern) { (Test-Path "$profileDir\app.log") -and [bool](Select-String -Path "$profileDir\app.log" -Pattern $Pattern -SimpleMatch) }
 function Log-Count([string]$Pattern) { if (Test-Path "$profileDir\app.log") { @(Select-String -Path "$profileDir\app.log" -Pattern $Pattern -SimpleMatch).Count } else { 0 } }
 function Grab-Bubble([string]$Name) {
-    $h = [E2E]::Find('Groq Insert Dictation - Opname'); if ($h -eq [IntPtr]::Zero) { $h = [E2E]::Find('Groq Insert Dictation - Transcriptie') }
+    $h = [E2E]::Find('Groq Insert Dictation - Recording'); if ($h -eq [IntPtr]::Zero) { $h = [E2E]::Find('Groq Insert Dictation - Transcribing') }
     if ($h -eq [IntPtr]::Zero) { return }
     $r = New-Object E2E+RECT; [E2E]::GetWindowRect($h, [ref]$r) | Out-Null
     $pad = 40; $w = $r.Right - $r.Left + 2 * $pad; $hgt = $r.Bottom - $r.Top + 2 * $pad
@@ -121,8 +121,8 @@ function Focus-Target {
     return (Wait-Until { [E2E]::Foreground() -eq $script:targetHwnd.ToInt64() } 3)
 }
 try {
-    if (-not (Wait-Until { [E2E]::Find('Groq E2E doelvenster') -ne [IntPtr]::Zero } 15)) { throw 'Target window did not open' }
-    $script:targetHwnd = [E2E]::GetAncestor([E2E]::Find('Groq E2E doelvenster'), 2)
+    if (-not (Wait-Until { [E2E]::Find('Groq E2E target window') -ne [IntPtr]::Zero } 15)) { throw 'Target window did not open' }
+    $script:targetHwnd = [E2E]::GetAncestor([E2E]::Find('Groq E2E target window'), 2)
     $appProcess = Start-Process -FilePath $App -WorkingDirectory (Split-Path $App) -PassThru
     if (-not (Wait-Until { Log-Has 'Startup ready' } 30)) { throw 'App did not finish startup' }
     $result.startup = (Select-String -Path "$profileDir\app.log" -Pattern 'Startup ready' | Select-Object -Last 1).Line
@@ -131,29 +131,29 @@ try {
     Fg-Step 'before shortcut'
     # 1. Shortcut starts and stops; the first transcript is pasted.
     [E2E]::Hotkey()
-    if (-not (Wait-Until { Log-Has 'Opname gestart' } 6)) { throw 'Shortcut did not start a recording' }
+    if (-not (Wait-Until { Log-Has 'Recording started' } 6)) { throw 'Shortcut did not start a recording' }
     Start-Sleep -Milliseconds 900
-    $bubble = [E2E]::Find('Groq Insert Dictation - Opname')
+    $bubble = [E2E]::Find('Groq Insert Dictation - Recording')
     $result.bubble_found = $bubble -ne [IntPtr]::Zero
     $result.bubble_noactivate = (([E2E]::GetWindowLongPtr($bubble, -20).ToInt64() -band 0x08000000) -ne 0)
     Fg-Step 'recording bubble shown'
     Grab-Bubble 'recording'
     Start-Sleep -Milliseconds 900
     [E2E]::Hotkey()
-    if (-not (Wait-Until { (Get-Content -LiteralPath $targetFile -Raw) -like 'Eerste dictaat*' } 12)) { throw "First paste missing: $(Get-Content -LiteralPath $targetFile -Raw)" }
+    if (-not (Wait-Until { (Get-Content -LiteralPath $targetFile -Raw) -like 'First dictation*' } 12)) { throw "First paste missing: $(Get-Content -LiteralPath $targetFile -Raw)" }
     Fg-Step 'after first paste'
-    Wait-Until { (Log-Count 'Klaar. Gebruik je shortcut') -ge 1 } 5 | Out-Null
+    Wait-Until { (Log-Count 'Ready. Use your shortcut') -ge 1 } 5 | Out-Null
     # 2. Shortcut starts, a click on the bubble stops; focus stays in the target.
     [E2E]::Hotkey()
-    if (-not (Wait-Until { (Log-Count 'Opname gestart') -ge 2 } 6)) { throw 'Second recording did not start' }
+    if (-not (Wait-Until { (Log-Count 'Recording started') -ge 2 } 6)) { throw 'Second recording did not start' }
     Start-Sleep -Milliseconds 1800
-    $bubble = [E2E]::Find('Groq Insert Dictation - Opname')
+    $bubble = [E2E]::Find('Groq Insert Dictation - Recording')
     $r = New-Object E2E+RECT; [E2E]::GetWindowRect($bubble, [ref]$r) | Out-Null
     [E2E]::Click([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2))
     Fg-Step 'after bubble click'
     Start-Sleep -Milliseconds 120
     Grab-Bubble 'processing'
-    if (-not (Wait-Until { (Get-Content -LiteralPath $targetFile -Raw) -like '*Tweede dictaat*' } 12)) { throw "Second paste missing: $(Get-Content -LiteralPath $targetFile -Raw)" }
+    if (-not (Wait-Until { (Get-Content -LiteralPath $targetFile -Raw) -like '*Second dictation*' } 12)) { throw "Second paste missing: $(Get-Content -LiteralPath $targetFile -Raw)" }
     Fg-Step 'after second paste'
     $result.target_text = [IO.File]::ReadAllText($targetFile)
     $result.audio = @(Select-String -Path "$profileDir\app.log" -Pattern 'Audio: ' | ForEach-Object { $_.Line })
@@ -166,7 +166,7 @@ try {
     if (Test-Path "$profileDir\app.log") { Copy-Item "$profileDir\app.log" (Join-Path $Out 'qa-app.log') }
     Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue
     $result.finished = (Get-Date -Format o)
-    $expected = 'Eerste dictaat via sneltoets. Tweede dictaat, gestopt met de bubbel. '
+    $expected = 'First dictation via shortcut. Second dictation, stopped with the bubble. '
     $result.passed = ($result.errors.Count -eq 0) -and ($result.target_text -eq $expected) -and $result.bubble_noactivate -and -not ($result.foreground | Where-Object { -not $_.target })
     $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Out 'desktop-e2e.json') -Encoding UTF8
 }

@@ -76,7 +76,7 @@ actual silent laptop recordings reported on 2026-10-10 (kept outside Git).
 Groq's `verbose_json` silence/confidence metadata provides a second
 check. These checks reduce empty-audio hallucinations; speech detection is not
 perfect. No transcript phrases are blacklisted, so spoken "Thank you" remains
-valid. Rejected audio stays in History and the app shows **Geen spraak gedetecteerd**.
+valid. Rejected audio stays in History and the app shows **No speech detected**.
 
 <!-- Source: Bram's request in T3, 2026-10-23, and the tests below. Scope: dictation and recording retries. -->
 In **0.2.6**, a silence of 2 seconds or longer after the last word is not sent
@@ -94,9 +94,9 @@ Settings are stored in `%APPDATA%\GroqInsertDictation\settings.json`. The API ke
 
 Open the personal dictionary from Settings to add names, jargon, and terms that are often transcribed with the wrong spelling. The app sends these terms as spelling context in the same Groq transcription request. Because Whisper treats that context as a hint rather than a guarantee, add known mistakes such as `Grok → Groq` or `Grog → Groq` in the **Replacements** section directly below the dictionary. Replacements are applied locally after transcription and before the text is copied or pasted. The existing free-form **Prompt** field continues to work alongside the dictionary.
 
-Longer dictations are split into short, chat-style paragraphs: a few sentences per block, with a new block where a new thought starts ("Verder", "Daarnaast", "Trouwens", ...) and for a closing such as "Groetjes". Only the spacing between sentences changes; short messages stay one block. Turn off **Automatisch alinea's maken** in Settings to paste everything as one block.
+Longer dictations are split into short, chat-style paragraphs: a few sentences per block, with a new block where a new thought starts ("Verder", "Daarnaast", "Trouwens", ...) and for a closing such as "Groetjes". Only the spacing between sentences changes; short messages stay one block. Turn off **Create paragraphs automatically** in Settings to paste everything as one block.
 
-The final period is preserved by default. Enable **Punt aan het einde verwijderen** in Settings if you prefer transcripts without one final period.
+The final period is preserved by default. Enable **Remove the final period** in Settings if you prefer transcripts without one final period.
 
 - `GROQ_MODEL=whisper-large-v3-turbo` for maximum speed.
 - `GROQ_MODEL=whisper-large-v3` for higher accuracy.
@@ -108,17 +108,27 @@ The final period is preserved by default. Enable **Punt aan het einde verwijdere
 
 Runtime and build dependencies are kept separately in `requirements.txt` and `requirements-build.txt`. The PowerShell scripts reinstall them only when the Python version or dependency files have changed.
 
+## English interface (0.2.9)
+
+<!-- Source: Bram in T3, 2026-11-12 (translated): "Can you update the UI to English entirely?" and "the repo in English too, and the release notes". Scope: all user-facing text. -->
+The whole interface is in English: the settings window, tray menu, status
+bubble, update and startup windows, notifications and error messages. Only the
+text changed; settings, history, the API key and the transcription language
+(`nl` by default) stay as they are. Recordings and transcripts saved by an
+older version keep their original error text. The built-in AI cleanup prompt
+is unchanged and still covers Dutch filler words and phrases.
+
 ## AI cleanup (0.2.7)
 
-<!-- Source: Bram's request in T3, 2026-10-24 ("AI-opschoning ... het liefste dat model wat hier staat, als dat kan, met Groq ... dat je dus je eigen system prompt erin kan stoppen"), and the tests below. Scope: text after transcription. -->
+<!-- Source: Bram's request in T3, 2026-10-24 (translated: "AI cleanup ... preferably the model listed here, if possible, with Groq ... so that you can put in your own system prompt"), and the tests below. Scope: text after transcription. -->
 After Whisper, the transcript goes to a chat model on Groq that removes
 filler words ("eh", "uh"), stutters and repetitions, keeps only the corrected
 version after "nee wacht" or "ik bedoel", and fixes punctuation, in the spirit
 of Wispr Flow. It is on by default, also after updating, with
-`openai/gpt-oss-120b` and the same API key. Settings has an **AI-opschoning**
+`openai/gpt-oss-120b` and the same API key. Settings has an **AI cleanup**
 page with the switch, the model (GPT-OSS 120B, GPT-OSS 20B or any Groq model
 ID) and the system prompt. The built-in prompt is shown there; edit it to use
-your own, or click **Standaardprompt herstellen**. Dictionary words are added
+your own, or click **Restore default prompt**. Dictionary words are added
 to the prompt as spellings.
 
 The order is: Whisper, word replacements, AI cleanup, paragraphs, final
@@ -142,33 +152,33 @@ and changed "transcribt" to "transcribeert". A cleanup took 0.1-0.6 s
 
 ## Microphone priority (0.2.8)
 
-<!-- Source: Bram's request in T3, 2026-10-24 (priority 1, 2, 3; switch automatically and show it; show clearly when there is no microphone), his approval of the mockup ("Ja, bouw maar in, dat is perfect"), and the tests below. Scope: microphone choice and the status bubble. -->
+<!-- Source: Bram's request in T3, 2026-10-24 (priority 1, 2, 3; switch automatically and show it; show clearly when there is no microphone), his approval of the mockup (translated: "Yes, build it in, that is perfect"), and the tests below. Scope: microphone choice and the status bubble. -->
 A friend had chosen a Bluetooth headset that was not connected; Alt+Z then
 seemed to do nothing, because the app only played the error sound and put a
-message in the tray tooltip. **Dicteren › Microfoons** is now a list in order of
+message in the tray tooltip. **Dictation › Microphones** is now a list in order of
 preference: each recording uses the first microphone that is connected. Every
-row says **In gebruik**, **Beschikbaar** or **Niet verbonden**, with buttons to
+row says **In use**, **Available** or **Not connected**, with buttons to
 move it up or down or remove it; the last one cannot be removed.
-**Microfoon toevoegen** offers the microphones that are connected now (Windows
-only lists a Bluetooth headset while it is connected) and **Windows-standaard**,
+**Add microphone** offers the microphones that are connected now (Windows
+only lists a Bluetooth headset while it is connected) and **Windows default**,
 which follows the microphone set in Windows.
 
-<!-- Source: Bram in T3, 2026-10-24: "die vangnet optie moet nog weg. Dan moeten mensen gewoon instellen wat ze willen." -->
-There is no hidden safety net: Windows-standaard is used only if it is in the
-list, at its place. New installs and a previous "Windows-standaard" choice
+<!-- Source: Bram in T3, 2026-10-24: (translated) "that safety net option still has to go. People should just set up what they want." -->
+There is no hidden safety net: Windows default is used only if it is in the
+list, at its place. New installs and a previous "Windows default" choice
 start with just that entry; a previously chosen microphone becomes the only
 entry.
 
-**Microfoon testen** tests the microphone the next recording would use. It
+**Test microphone** tests the microphone the next recording would use. It
 records until you click **Stop test** (at most 10 seconds) and keeps what you
-said for **Terugluisteren**; before 0.2.8 it always took 5 seconds.
+said for **Play back**; before 0.2.8 it always took 5 seconds.
 
 The app reads the Windows audio devices again at every shortcut press
 (re-initializing PortAudio took about 40 ms on AMD), so a headset that connected
 or disconnected since the previous recording counts. A listed microphone that
 cannot be opened is skipped too.
 
-<!-- Source: Bram in T3, 2026-10-24: "ik wil dat die fallback ook werkt als TIJDENS het recorden de verbinding wegvalt" and "als de eerste mic weer terugkomt moet die daar ook weer fallback naar doen". -->
+<!-- Source: Bram in T3, 2026-10-24: (translated) "I want the fallback to also work when the connection drops DURING the recording" and "when the first mic comes back it should fall back to it again". -->
 During a recording the app keeps watching. If the microphone disappears (its
 stream stops, no audio arrives for 1 second, or Windows no longer lists it), the
 same recording continues on the next microphone of the list; what was said
@@ -181,16 +191,16 @@ and takes about a millisecond. If no microphone is left, the recording stops
 and what was captured is transcribed.
 
 If the recording does not use priority 1, a card above the bubble says
-**Overgeschakeld naar …** and which microphones were not connected (or
-**Verbinding met … verbroken** after a switch during the recording) for 3
+**Switched to …** and which microphones were not connected (or
+**Lost connection to …** after a switch during the recording) for 3
 seconds, and an amber number stays in the bubble until the recording ends or
-priority 1 is back; switching back shows a green card **Terug naar …**. Without
+priority 1 is back; switching back shows a green card **Back to …**. Without
 any working microphone in the list nothing is recorded: the error sound plays
-and a red card **Geen microfoon gevonden** stays for 6 seconds; clicking it
+and a red card **No microphone found** stays for 6 seconds; clicking it
 opens Settings at the microphones.
 
 `settings.json` keeps `input_device` as the first entry ("" for
-Windows-standaard) next to the `input_devices` list, so an older version (after
+Windows default) next to the `input_devices` list, so an older version (after
 a rollback) still uses the preferred microphone. Such a version saves the file
 without the list, so after a rollback the list shrinks to that one microphone.
 
@@ -212,7 +222,7 @@ next update.
 
 The app pastes text using `Ctrl+V` instead of typing it character by character. This is faster and works better with Dutch characters, punctuation, and longer text. Because the transcript is copied to the clipboard first, you can always paste it manually if automatic pasting fails.
 
-<!-- Source: Bram's request in T3, 2026-10-23 ("probeer t maar te fixen hoe jij denkt dat het t beste is"). Scope: automatic pasting. -->
+<!-- Source: Bram's request in T3, 2026-10-23 (translated: "try to fix it the way you think is best"). Scope: automatic pasting. -->
 Since **0.2.6** the app no longer presses `Ctrl+V` the instant the transcript
 reaches the clipboard. Some apps sometimes pasted nothing: clipboard tools
 (Windows clipboard history, cloud clipboard, clipboard managers) briefly lock
@@ -226,7 +236,7 @@ program received the paste, so an app that still misses it can be identified.
 The text is still pasted in one go; none of these projects pastes in chunks by
 default.
 
-<!-- Source: Bram's report and observation in T3, 2026-10-24 ("als je tijdens recording in een tekstvak klikt dan plakt die daarna niet goed"). Scope: shortcuts with Alt or Windows. -->
+<!-- Source: Bram's report and observation in T3, 2026-10-24 (translated: "if you click into a text box during a recording, it does not paste properly afterwards"). Scope: shortcuts with Alt or Windows. -->
 Since **0.2.7** the shortcut no longer moves the focus. Windows
 swallows the Z of `Alt+Z` but passes the Alt press and release on to the active
 window, so releasing Alt after Z looked like a lone Alt. Electron apps with a
@@ -240,11 +250,11 @@ or Windows key.
 
 ## Interface and reliability (0.1.19)
 
-The settings window was rebuilt around five pages in a fixed sidebar: **Dicteren**
-(shortcut, microphone, behaviour switches), **Herkenning** (language, multi-line
-prompt), **Woordenboek** (words and replacements side by side, no separate dialog),
-**Verbinding** (API key with show/hide and a "Verbinding testen" button, model) and
-**Over** (version, update check, log file, restart). Unsaved edits are flagged in the
+The settings window was rebuilt around five pages in a fixed sidebar: **Dictation**
+(shortcut, microphone, behaviour switches), **Recognition** (language, multi-line
+prompt), **Dictionary** (words and replacements side by side, no separate dialog),
+**Connection** (API key with show/hide and a "Test connection" button, model) and
+**About** (version, update check, log file, restart). Unsaved edits are flagged in the
 footer and confirmed before closing. Launch `GroqInsertDictation.exe --settings` to
 open the settings after startup. The UI code lives in `settings_ui.py`.
 
@@ -260,8 +270,8 @@ app starts anyway and asks you to pick a different shortcut.
 Clicking the floating status bubble now stops a running recording; when idle it
 opens the settings.
 
-**Geschiedenis** keeps the last twenty transcriptions (newest first) with a copy button
-per entry and a "Geschiedenis wissen" button. It is stored locally in
+**History** keeps the last twenty transcriptions (newest first) with a copy button
+per entry and a "Clear history" button. It is stored locally in
 `%APPDATA%\GroqInsertDictation\history.json` and is also reachable from the tray menu.
 
 The app now ships its own icon (`branding.py`): embedded in the executable, used by the
@@ -270,19 +280,19 @@ tray and shown on every window and in the taskbar instead of the default Tk feat
 <!-- Source: Bram's requests, 2026-10-06. Scope: Groq Windows Dictation. Sharp taskbar icon and visible selected microphone. -->
 Version **0.1.26** supplies native icon sizes for the title bar and taskbar, with
 each ICO frame rendered separately. The microphone selector shows the actual
-device name even when following **Windows-standaard**. The complete selection is
-also shown below the selector so long names remain readable. **Vernieuwen** keeps
+device name even when following **Windows default**. The complete selection is
+also shown below the selector so long names remain readable. **Refresh** keeps
 your selection; a missing selected device is shown as unavailable.
 
 <!-- Source: Bram's request, 2026-10-06. Scope: Groq Windows Dictation. Replace sound cues preview with a microphone test and remove unplugged microphones from the device list. -->
-In **0.1.27**, **Microfoon testen** records five seconds from the selected input,
-including an unsaved selection, with a live input meter and **Terugluisteren**.
+In **0.1.27**, **Test microphone** records five seconds from the selected input,
+including an unsaved selection, with a live input meter and **Play back**.
 The test stays local, does not contact Groq or enter History, and is discarded
 when you close Settings or start another test. Stop the test at any time with
 **Stop test**. Silence and disconnected/unavailable devices are reported.
-The former **Geluiden testen** preview has been removed.
+The former **Test sounds** preview has been removed.
 
-Opening Settings or clicking **Vernieuwen** now reinitializes PortAudio while
+Opening Settings or clicking **Refresh** now reinitializes PortAudio while
 idle, so unplugged USB microphones and changed Windows defaults are detected.
 The device list uses Windows audio endpoints without duplicate backend entries,
 and explicit choices use names instead of volatile PortAudio indices. Legacy
@@ -297,26 +307,26 @@ without saving. (Since 0.2.0 these are Qt tests that also run headless with
 
 <!-- Source: Bram's request, 2026-10-03. Scope: Groq Windows Dictation. Keep twenty recordings and allow transcription retries in the app. -->
 
-Geschiedenis also keeps the last **twenty voice recordings**, independently of
-the twenty transcripts. The **Opnames** tab stores the original audio locally in
+History also keeps the last **twenty voice recordings**, independently of
+the twenty transcripts. The **Recordings** tab stores the original audio locally in
 `%APPDATA%\GroqInsertDictation\recordings` before contacting Groq, including short
 recordings and failed or empty transcription responses. Recordings and their
 status survive app restarts. The oldest audio and its metadata are removed when
 the twenty-first recording is saved.
 
-Use **Opnieuw transcriberen** on a recording to try again with your currently
+Use **Transcribe again** on a recording to try again with your currently
 saved API key, model, language, prompt, dictionary and replacements. The result
-is copied to the clipboard and added to **Teksten**; a retry keeps the original
+is copied to the clipboard and added to **Transcripts**; a retry keeps the original
 recording and does not automatically paste into the Settings window. You can
 retry while idle, including after correcting your connection or settings.
-**Geschiedenis wissen** removes both the saved audio and the transcripts.
+**Clear history** removes both the saved audio and the transcripts.
 Recordings deleted by older app versions cannot be recovered.
 
 ## Listening back to recordings (0.1.24, player 0.1.25)
 
 <!-- Source: Bram's request, 2026-10-04. Scope: Groq Windows Dictation. Play saved recordings from the history. -->
 
-Each recording in the **Opnames** tab has a small player: a play/pause button,
+Each recording in the **Recordings** tab has a small player: a play/pause button,
 a progress bar you can click or drag to jump to another moment, and the elapsed
 and total time. Audio plays through the default Windows output device. Pausing
 keeps your position; playing another recording, starting a dictation, closing the
@@ -325,7 +335,7 @@ to a temporary file to seek with `winsound`; 0.2.0 replaces that, see below.)
 
 ## Modern Qt interface (0.2.0)
 
-<!-- Source: Bram's explicit instruction "Oke laat opus maar bouwen", 2026-10-06, confirming the Python + PySide6/Qt Widgets modernization. Scope: Groq Windows Dictation. -->
+<!-- Source: Bram's explicit instruction "Oke laat opus maar bouwen" (translated: "OK, let Opus build it"), 2026-10-06, confirming the Python + PySide6/Qt Widgets modernization. Scope: Groq Windows Dictation. -->
 
 Bram decided on 2026-10-06 to keep Python and replace Tkinter/ttk, pystray and
 the winsound-based player with **PySide6 (Qt for Python) using Qt Widgets**, not
@@ -359,7 +369,7 @@ which map directly to Qt Widgets in plain Python.
   It is a tool window that never accepts focus (`WindowDoesNotAcceptFocus`,
   `WS_EX_NOACTIVATE`, `MA_NOACTIVATE`), so showing it or clicking it to stop
   keeps the window you dictate into active and Ctrl+V lands there.
-- History playback and **Terugluisteren** use PortAudio output with the PCM in
+- History playback and **Play back** use PortAudio output with the PCM in
   memory: the position shown is the position actually played, seeking needs no
   temporary files, and a dictation, refresh or clearing history releases the
   output device first. Cues still use `winsound`.

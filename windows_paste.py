@@ -140,9 +140,9 @@ def paste_clipboard(
 
     report = PasteReport(target, round((clock() - started) * 1000), clipboard_free, tuple(held))
     logging.info(
-        "Ctrl+V naar %s na %d ms%s%s", report.target or "onbekend venster", report.waited_ms,
-        "" if clipboard_free else "; klembord bleef bezet",
-        f"; vastgehouden toetsen losgelaten: {', '.join(hex(key) for key in held)}" if held else "",
+        "Ctrl+V to %s after %d ms%s%s", report.target or "unknown window", report.waited_ms,
+        "" if clipboard_free else "; clipboard stayed busy",
+        f"; released held keys: {', '.join(hex(key) for key in held)}" if held else "",
     )
     return report
 
@@ -188,7 +188,7 @@ class WindowsKeyboard:
 
     def __init__(self) -> None:
         if os.name != "nt":
-            raise RuntimeError("Automatisch plakken werkt alleen op Windows.")
+            raise RuntimeError("Automatic paste only works on Windows.")
         self.user32 = user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.kernel32 = kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         user32.GetAsyncKeyState.argtypes = [ctypes.c_int]

@@ -54,7 +54,7 @@ def normalize_cleanup_prompt(value: object) -> str:
     if prompt == DEFAULT_CLEANUP_PROMPT:
         return ""
     if len(prompt) > MAX_CLEANUP_PROMPT_LENGTH:
-        raise ValueError(f"De systeemprompt mag maximaal {MAX_CLEANUP_PROMPT_LENGTH} tekens bevatten.")
+        raise ValueError(f"The system prompt can contain at most {MAX_CLEANUP_PROMPT_LENGTH} characters.")
     return prompt
 
 
@@ -98,24 +98,24 @@ def clean_transcript(client, text: str, *, model: str, system_prompt: str) -> st
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         if status == 429 or "rate limit" in str(exc).lower():
-            raise CleanupError("Groq-limiet voor AI-opschoning bereikt") from exc
+            raise CleanupError("Groq rate limit reached for AI cleanup") from exc
         if status == 404 or "model_not_found" in str(exc):
-            raise CleanupError(f"Model {model} is niet beschikbaar") from exc
-        raise CleanupError(f"AI-opschoning mislukt: {exc}") from exc
+            raise CleanupError(f"Model {model} is not available") from exc
+        raise CleanupError(f"AI cleanup failed: {exc}") from exc
 
     try:
         choice = response.choices[0]
         content = choice.message.content or ""
     except (AttributeError, IndexError, TypeError) as exc:
-        raise CleanupError("Leeg antwoord van de AI-opschoning") from exc
+        raise CleanupError("Empty response from AI cleanup") from exc
     if getattr(choice, "finish_reason", "stop") == "length":
-        raise CleanupError("Antwoord van de AI-opschoning was afgekapt")
+        raise CleanupError("The AI cleanup response was cut off")
     cleaned = _TAG.sub("", _THINKING.sub("", content)).translate(_TYPOGRAPHY).strip()
     if system_prompt.startswith(DEFAULT_CLEANUP_PROMPT) and "\n" not in text:
         # The built-in prompt asks for one block; the app makes the paragraphs.
         cleaned = re.sub(r"[ \t]*\n\s*", " ", cleaned)
     if not cleaned:
-        raise CleanupError("Leeg antwoord van de AI-opschoning")
+        raise CleanupError("Empty response from AI cleanup")
     if len(cleaned) > len(text) * _MAX_GROWTH_FACTOR + _MAX_GROWTH_CHARACTERS:
-        raise CleanupError("AI-opschoning gaf veel meer tekst terug dan je dicteerde")
+        raise CleanupError("AI cleanup returned much more text than you dictated")
     return cleaned

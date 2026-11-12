@@ -15,7 +15,7 @@ MAX_VOCABULARY_PROMPT_BYTES = 192
 MAX_WORD_REPLACEMENTS = 50
 MAX_REPLACEMENT_PART_LENGTH = 80
 # Selector label prefix for "follow the Windows default input".
-DEFAULT_DEVICE_LABEL = "Windows-standaard"
+DEFAULT_DEVICE_LABEL = "Windows default"
 
 
 def short_device_name(name: str) -> str:
@@ -32,13 +32,13 @@ def short_device_name(name: str) -> str:
 
 
 def unavailable_microphones_text(names: Sequence[str], *, connected: bool = True) -> str:
-    """"Soundcore niet verbonden", "A en B niet verbonden", "3 microfoons niet verbonden"."""
-    state = "niet verbonden" if connected else "niet beschikbaar"
+    """"Soundcore not connected", "A and B not connected", "3 microphones not connected"."""
+    state = "not connected" if connected else "unavailable"
     if len(names) == 1:
         return f"{names[0]} {state}"
     if len(names) == 2:
-        return f"{names[0]} en {names[1]} {state}"
-    return f"{len(names)} microfoons {state}"
+        return f"{names[0]} and {names[1]} {state}"
+    return f"{len(names)} microphones {state}"
 
 
 class DictionaryValidationError(ValueError):
@@ -48,13 +48,13 @@ class DictionaryValidationError(ValueError):
 def normalize_custom_word(value: str) -> str:
     word = unicodedata.normalize("NFC", str(value).strip())
     if not word:
-        raise DictionaryValidationError("Vul eerst een woord of naam in.")
+        raise DictionaryValidationError("Enter a word or name first.")
     if len(word) > MAX_CUSTOM_WORD_LENGTH:
         raise DictionaryValidationError(
-            f"Een woordenboekitem mag maximaal {MAX_CUSTOM_WORD_LENGTH} tekens bevatten."
+            f"A dictionary entry can contain at most {MAX_CUSTOM_WORD_LENGTH} characters."
         )
     if any(unicodedata.category(character).startswith("C") for character in word):
-        raise DictionaryValidationError("Een woordenboekitem mag geen regeleinden of stuurtekens bevatten.")
+        raise DictionaryValidationError("A dictionary entry cannot contain line breaks or control characters.")
     return word
 
 
@@ -64,7 +64,7 @@ def normalize_custom_words(values: Iterable[object], *, strict: bool = True) -> 
     for value in values:
         if not isinstance(value, str):
             if strict:
-                raise DictionaryValidationError("Het woordenboek bevat een ongeldig item.")
+                raise DictionaryValidationError("The dictionary contains an invalid entry.")
             continue
         try:
             word = normalize_custom_word(value)
@@ -80,7 +80,7 @@ def normalize_custom_words(values: Iterable[object], *, strict: bool = True) -> 
         if len(result) > MAX_CUSTOM_WORDS:
             if strict:
                 raise DictionaryValidationError(
-                    f"Het woordenboek mag maximaal {MAX_CUSTOM_WORDS} items bevatten."
+                    f"The dictionary can contain at most {MAX_CUSTOM_WORDS} entries."
                 )
             result = result[:MAX_CUSTOM_WORDS]
             break
@@ -90,8 +90,8 @@ def normalize_custom_words(values: Iterable[object], *, strict: bool = True) -> 
     if result and vocabulary_size(result) > MAX_VOCABULARY_PROMPT_BYTES:
         if strict:
             raise DictionaryValidationError(
-                "Het woordenboek is te groot voor betrouwbare Groq-spellingcontext. "
-                "Verwijder enkele woorden of maak lange items korter."
+                "The dictionary is too large for reliable Groq spelling context. "
+                "Remove some words or shorten long entries."
             )
         while result and vocabulary_size(result) > MAX_VOCABULARY_PROMPT_BYTES:
             result.pop()
@@ -114,13 +114,13 @@ def compose_transcription_prompt(base_prompt: str, custom_words: Sequence[str]) 
 def normalize_replacement_part(value: object, label: str) -> str:
     part = unicodedata.normalize("NFC", str(value).strip())
     if not part:
-        raise DictionaryValidationError(f"Vul eerst het {label} woord in.")
+        raise DictionaryValidationError(f"Enter the {label} word first.")
     if len(part) > MAX_REPLACEMENT_PART_LENGTH:
         raise DictionaryValidationError(
-            f"Een vervangingsveld mag maximaal {MAX_REPLACEMENT_PART_LENGTH} tekens bevatten."
+            f"A replacement field can contain at most {MAX_REPLACEMENT_PART_LENGTH} characters."
         )
     if any(unicodedata.category(character).startswith("C") for character in part):
-        raise DictionaryValidationError("Een vervanging mag geen regeleinden of stuurtekens bevatten.")
+        raise DictionaryValidationError("A replacement cannot contain line breaks or control characters.")
     return part
 
 
@@ -134,11 +134,11 @@ def normalize_word_replacements(
     for value in values:
         if not isinstance(value, (list, tuple)) or len(value) != 2:
             if strict:
-                raise DictionaryValidationError("De woordvervangingen bevatten een ongeldig item.")
+                raise DictionaryValidationError("The word replacements contain an invalid entry.")
             continue
         try:
-            source = normalize_replacement_part(value[0], "verkeerd herkende")
-            target = normalize_replacement_part(value[1], "correcte")
+            source = normalize_replacement_part(value[0], "misrecognized")
+            target = normalize_replacement_part(value[1], "correct")
         except DictionaryValidationError:
             if strict:
                 raise
@@ -148,14 +148,14 @@ def normalize_word_replacements(
         previous = seen.get(folded)
         if previous is not None:
             if strict and previous != target:
-                raise DictionaryValidationError(f"Voor '{source}' bestaat al een andere vervanging.")
+                raise DictionaryValidationError(f"A different replacement for '{source}' already exists.")
             continue
         seen[folded] = target
         result.append((source, target))
         if len(result) > MAX_WORD_REPLACEMENTS:
             if strict:
                 raise DictionaryValidationError(
-                    f"Je kunt maximaal {MAX_WORD_REPLACEMENTS} woordvervangingen opslaan."
+                    f"You can save at most {MAX_WORD_REPLACEMENTS} word replacements."
                 )
             result = result[:MAX_WORD_REPLACEMENTS]
             break

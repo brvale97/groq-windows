@@ -33,7 +33,7 @@ $installDir = Join-Path $env:LOCALAPPDATA "Programs\GroqInsertDictation"
 $target = Join-Path $installDir "GroqInsertDictation.exe"
 $running = @(Get-CimInstance Win32_Process -Filter "Name = 'GroqInsertDictation.exe'" | Where-Object { $_.ExecutablePath -eq $target })
 if ($running.Count -gt 0) {
-    throw "Groq Insert Dictation draait nog. Sluit de app af via het systeemvak (Afsluiten) en start dit script opnieuw."
+    throw "Groq Insert Dictation is still running. Quit the app from the system tray (Quit) and run this script again."
 }
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null

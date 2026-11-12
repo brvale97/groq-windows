@@ -99,17 +99,17 @@ class StagingTests(unittest.TestCase):
     def test_zip_slip_and_invalid_apps_are_rejected(self):
         archive = self.root / "evil.zip"
         folder_zip(archive, extra={"../outside.txt": b"x"})
-        with self.assertRaisesRegex(RuntimeError, "ongeldig pad"):
+        with self.assertRaisesRegex(RuntimeError, "invalid path"):
             updater.extract_folder_build(archive, self.root / "staging")
         self.assertFalse((self.root / "outside.txt").exists())
         archive = self.root / "fake.zip"
         folder_zip(archive, exe=b"not an exe" * 200)
-        with self.assertRaisesRegex(RuntimeError, "geen geldige"):
+        with self.assertRaisesRegex(RuntimeError, "valid Windows app"):
             updater.extract_folder_build(archive, self.root / "staging2")
         incomplete = self.root / "incomplete.zip"
         with zipfile.ZipFile(incomplete, "w") as bundle:
             bundle.writestr("GroqInsertDictation.exe", b"MZ" + b"\0" * 2000)
-        with self.assertRaisesRegex(RuntimeError, "geen geldige"):
+        with self.assertRaisesRegex(RuntimeError, "valid Windows app"):
             updater.extract_folder_build(incomplete, self.root / "staging3")
 
     def test_download_verifies_the_manifest_checksum_and_stages_beside_the_app(self):
@@ -143,7 +143,7 @@ class StagingTests(unittest.TestCase):
             self.assertTrue((staged / "_internal" / "python313.dll").exists())
             self.assertEqual(list((self.root / "appdata" / "updates").iterdir()), [])
             with mock.patch.object(updater, "_get_json", return_value={"version": "9.0.0", "zip_sha256": "0" * 64}):
-                with self.assertRaisesRegex(RuntimeError, "controlesom"):
+                with self.assertRaisesRegex(RuntimeError, "checksum"):
                     updater.download_update(update)
 
     def test_swap_script_backs_up_rolls_back_and_waits_for_confirmation(self):

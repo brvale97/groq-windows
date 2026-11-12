@@ -33,7 +33,7 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
     """Return int16 frames shaped (frames, channels) and the sample rate."""
     with wave.open(str(path), "rb") as audio:
         if audio.getsampwidth() != 2:
-            raise RuntimeError("Alleen 16-bit WAV-opnames kunnen worden afgespeeld.")
+            raise RuntimeError("Only 16-bit WAV recordings can be played.")
         channels = audio.getnchannels()
         rate = audio.getframerate()
         data = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2")

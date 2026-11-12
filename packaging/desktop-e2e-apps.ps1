@@ -74,7 +74,7 @@ public static class Windows2 {
     public static string Title(IntPtr h) { var s = new StringBuilder(1024); GetWindowText(h, s, 1024); return s.ToString(); }
 }
 '@
-$texts = [ordered]@{ word = 'Word plaktest Groq.'; edge = 'Edge plaktest Groq.'; chrome = 'Chrome plaktest Groq.' }
+$texts = [ordered]@{ word = 'Word paste test Groq.'; edge = 'Edge paste test Groq.'; chrome = 'Chrome paste test Groq.' }
 $result = [ordered]@{ started = (Get-Date -Format o); targets = [ordered]@{} }
 $profileDir = Join-Path $env:APPDATA 'GroqInsertDictation-qa'
 Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -95,19 +95,19 @@ function Focus([IntPtr]$Hwnd) {
 }
 function Dictate([IntPtr]$Hwnd, [string]$Stop) {
     $root = [E2E]::GetAncestor($Hwnd, 2).ToInt64()
-    $count = Log-Count 'Opname gestart'
-    $done = Log-Count 'Klaar. Gebruik je shortcut'
+    $count = Log-Count 'Recording started'
+    $done = Log-Count 'Ready. Use your shortcut'
     [E2E]::Hotkey()
-    if (-not (Wait-Until { (Log-Count 'Opname gestart') -gt $count } 6)) { throw 'Shortcut did not start a recording' }
+    if (-not (Wait-Until { (Log-Count 'Recording started') -gt $count } 6)) { throw 'Shortcut did not start a recording' }
     Start-Sleep -Milliseconds 1700
     $during = [E2E]::Foreground() -eq $root
     if ($Stop -eq 'bubble') {
-        $bubble = [E2E]::Find('Groq Insert Dictation - Opname')
+        $bubble = [E2E]::Find('Groq Insert Dictation - Recording')
         $r = New-Object E2E+RECT; [E2E]::GetWindowRect($bubble, [ref]$r) | Out-Null
         [E2E]::Click([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2))
     } else { [E2E]::Hotkey() }
     $afterStop = [E2E]::Foreground() -eq $root
-    Wait-Until { (Log-Count 'Klaar. Gebruik je shortcut') -gt $done } 10 | Out-Null
+    Wait-Until { (Log-Count 'Ready. Use your shortcut') -gt $done } 10 | Out-Null
     Start-Sleep -Milliseconds 700
     return @{ focus_while_recording = $during; focus_after_stop = $afterStop; stop = $Stop; focus_after_paste = ([E2E]::Foreground() -eq $root) }
 }

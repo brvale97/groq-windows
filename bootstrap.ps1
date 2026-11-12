@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 
 function Assert-NativeSuccess([string]$Context) {
     if ($LASTEXITCODE -ne 0) {
-        throw "$Context is mislukt met exitcode $LASTEXITCODE."
+        throw "$Context failed with exit code $LASTEXITCODE."
     }
 }
 

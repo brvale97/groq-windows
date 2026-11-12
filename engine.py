@@ -160,7 +160,7 @@ def resolve_input_device(input_device: str) -> int | None:
     if input_device.isdigit():
         index = int(input_device)
         if sd.query_devices(index)["max_input_channels"] < 1:
-            raise RuntimeError("De geselecteerde microfoon is niet beschikbaar.")
+            raise RuntimeError("The selected microphone is not available.")
         return index
 
     if input_device.startswith("wasapi:"):
@@ -171,7 +171,7 @@ def resolve_input_device(input_device: str) -> int | None:
                 for index in host["devices"]:
                     if devices[index]["max_input_channels"] > 0 and devices[index]["name"] == name:
                         return index
-        raise RuntimeError(f"Microfoon {name!r} is niet aangesloten of niet beschikbaar.")
+        raise RuntimeError(f"Microphone {name!r} is not connected or not available.")
 
     devices = sd.query_devices()
     needle = input_device.lower()
@@ -179,7 +179,7 @@ def resolve_input_device(input_device: str) -> int | None:
         if device["max_input_channels"] > 0 and needle in device["name"].lower():
             return index
 
-    raise RuntimeError(f"Geen input device gevonden voor {input_device!r}.")
+    raise RuntimeError(f"No input device found for {input_device!r}.")
 
 
 def default_input_name() -> str | None:
@@ -281,7 +281,7 @@ def input_devices() -> list[tuple[str, str]]:
     default_name = default_input_name()
     default_label = (
         f"{DEFAULT_DEVICE_LABEL}: {default_name}"
-        if default_name else f"{DEFAULT_DEVICE_LABEL} (geen microfoon beschikbaar)"
+        if default_name else f"{DEFAULT_DEVICE_LABEL} (no microphone available)"
     )
     devices = [("", default_label)]
     for host in sd.query_hostapis():
@@ -369,7 +369,7 @@ class InputChoice:
     # or whether it switched back because a higher priority returned.
     lost: str = ""
     returned: bool = False
-    # The list entry "Windows-standaard": whatever Windows uses.
+    # The list entry "Windows default": whatever Windows uses.
     windows_default: bool = False
 
     @property
@@ -381,8 +381,8 @@ class NoMicrophoneError(RuntimeError):
     def __init__(self, *, found: bool) -> None:
         self.found = found
         super().__init__(
-            "Geen microfoon kon worden geopend. Kies een andere microfoon in Instellingen." if found
-            else "Geen microfoon gevonden. Verbind je headset of sluit een microfoon aan."
+            "No microphone could be opened. Choose another microphone in Settings." if found
+            else "No microphone found. Connect your headset or plug in a microphone."
         )
 
 
@@ -451,7 +451,7 @@ class DictationEngine:
         self.stream_transition_lock = threading.Lock()
 
         prepare_speech_detection()
-        logging.info("Spraakdetectie klaar: Silero VAD, lokaal op CPU")
+        logging.info("Speech detection ready: Silero VAD, local on CPU")
 
     def update_config(self, config: Config) -> None:
         with self.lock:
@@ -484,14 +484,14 @@ class DictationEngine:
             elif state == "recording":
                 self.stop_recording()
             elif state == "testing":
-                self.notify("Microfoontest bezig. Stop de test in Instellingen.")
+                self.notify("Microphone test in progress. Stop the test in Settings.")
             else:
-                self.notify("Nog bezig met transcriberen; shortcut genegeerd.")
+                self.notify("Still transcribing; shortcut ignored.")
         except Exception as exc:
             with self.lock:
                 self.state = "idle"
             self.emit_state("idle")
-            self.notify(f"Kon opname niet starten/stoppen: {exc}")
+            self.notify(f"Could not start/stop recording: {exc}")
             play_sound("error.wav")
 
     def start_recording(self) -> None:
@@ -522,7 +522,7 @@ class DictationEngine:
                 )
 
             if session is None:
-                self.notify("Open Instellingen en vul eerst je Groq API key in.")
+                self.notify("Open Settings and enter your Groq API key first.")
                 play_sound("error.wav")
                 return
             self.state = "recording"
@@ -559,7 +559,7 @@ class DictationEngine:
         self.input_callback(choice)
         self.emit_state("recording")
         play_sound("start.wav")
-        self.notify("Opname gestart. Gebruik je shortcut opnieuw om te stoppen.")
+        self.notify("Recording started. Use your shortcut again to stop.")
         self._watch_input(stream)
 
     def _watch_input(self, stream) -> None:
@@ -603,14 +603,14 @@ class DictationEngine:
             ticks += 1
             reason, returned = "", ""
             if not active:
-                reason = "stream gestopt"
+                reason = "stream stopped"
             elif time.monotonic() - self.last_audio_at >= INPUT_STALL_SECONDS:
-                reason = "geen audio meer"
+                reason = "no more audio"
             elif (check_presence or better) and ticks % INPUT_PRESENCE_EVERY_TICKS == 0:
                 names = live_input_names()
                 if names is not None:
                     if check_presence and name not in names:
-                        reason = "niet meer in de Windows-lijst"
+                        reason = "no longer in the Windows list"
                     else:
                         now = time.monotonic()
                         listed = [b for b in better if b in names and now >= self.return_retry_after.get(b, 0.0)]
@@ -619,9 +619,9 @@ class DictationEngine:
             if not reason and not returned:
                 continue
             if reason:
-                logging.warning("Microfoon %s: %s.", name or "onbekend", reason)
+                logging.warning("Microphone %s: %s.", name or "unknown", reason)
             else:
-                logging.info("Microfoon %s is terug; terugschakelen.", returned)
+                logging.info("Microphone %s is back; switching back.", returned)
             try:
                 self.switch_input(stream, lost=bool(reason), returned=returned)
             except Exception:
@@ -664,7 +664,7 @@ class DictationEngine:
                 stream, choice = self._open_input(selectors, session, exclude=frozenset(self.lost_inputs))
             except NoMicrophoneError:
                 play_sound("error.wav")
-                self.notify("Microfoon weggevallen. De opname tot dat moment wordt verwerkt.")
+                self.notify("Microphone lost. The recording up to that point is being processed.")
                 self._stop_recording()
                 return
             changed = choice.name != previous_name
@@ -687,8 +687,8 @@ class DictationEngine:
                 self.last_audio_at = time.monotonic()
         if lost or changed:
             self.input_callback(choice)
-            verb = "Terug naar" if choice.returned else "Overgeschakeld naar"
-            self.notify(f"{verb} {choice.name}; de opname loopt door.")
+            verb = "Back to" if choice.returned else "Switched to"
+            self.notify(f"{verb} {choice.name}; the recording continues.")
         self._watch_input(stream)
 
     def _open_input(
@@ -696,7 +696,7 @@ class DictationEngine:
     ) -> tuple[sd.InputStream, InputChoice]:
         """Open the first microphone of the priority list that works.
 
-        "" in the list is Windows-standaard: whatever microphone Windows uses.
+        "" in the list is Windows default: whatever microphone Windows uses.
         PortAudio lists devices only when it initializes, so the list is read
         again first: a headset that connected or disconnected since the last
         recording counts. Microphones named in ``exclude`` (lost during this
@@ -714,7 +714,7 @@ class DictationEngine:
             else:
                 name = default_input_name() or ""
                 if not name:
-                    logging.info("Microfoon %d overgeslagen: Windows heeft geen standaardmicrofoon.", priority)
+                    logging.info("Microphone %d skipped: Windows has no default microphone.", priority)
                     skipped.append(DEFAULT_DEVICE_LABEL)
                     continue
             if name in exclude:
@@ -724,7 +724,7 @@ class DictationEngine:
                 try:
                     device = resolve_input_device(selector)
                 except Exception as exc:
-                    logging.info("Microfoon %d overgeslagen: %s", priority, exc)
+                    logging.info("Microphone %d skipped: %s", priority, exc)
                     skipped.append(name)
                     continue
             else:
@@ -733,7 +733,7 @@ class DictationEngine:
             try:
                 stream = self._open_stream(session, device, wasapi=wasapi)
             except Exception as exc:
-                logging.warning("Microfoon %d (%s) kon niet worden geopend: %s", priority, name, exc)
+                logging.warning("Microphone %d (%s) could not be opened: %s", priority, name, exc)
                 skipped.append(name)
                 skipped_missing = False
                 continue
@@ -748,9 +748,9 @@ class DictationEngine:
         else:
             raise NoMicrophoneError(found=not skipped_missing)
         logging.info(
-            "Opname met %s (prioriteit %d%s)%s", choice.name, choice.priority,
-            ", Windows-standaard" if choice.windows_default else "",
-            f"; niet beschikbaar: {', '.join(choice.skipped)}" if choice.skipped else "",
+            "Recording with %s (priority %d%s)%s", choice.name, choice.priority,
+            ", Windows default" if choice.windows_default else "",
+            f"; unavailable: {', '.join(choice.skipped)}" if choice.skipped else "",
         )
         return stream, choice
 
@@ -809,10 +809,10 @@ class DictationEngine:
                 break
 
         if self.audio_warning:
-            self.notify(f"Audio waarschuwing: {self.audio_warning}")
-        self.notify("Opname gestopt. Transcriberen...")
+            self.notify(f"Audio warning: {self.audio_warning}")
+        self.notify("Recording stopped. Transcribing...")
         if session is None:
-            raise RuntimeError("Opnamesessie ontbreekt.")
+            raise RuntimeError("Recording session is missing.")
         threading.Thread(
             target=self.transcribe_and_output,
             args=(session, captured_frames),
@@ -854,7 +854,7 @@ class DictationEngine:
         frames: list[np.ndarray],
     ) -> tuple[Path, float, float, float]:
         if not frames:
-            raise RuntimeError("Geen audio opgenomen.")
+            raise RuntimeError("No audio recorded.")
 
         temp = tempfile.NamedTemporaryFile(
             prefix="groq-insert-dictation-",
@@ -894,10 +894,10 @@ class DictationEngine:
         """Retry saved audio with current settings, without pasting into Settings."""
         with self.lock:
             if self.state != "idle":
-                raise RuntimeError("Wacht tot de huidige opname of transcriptie klaar is.")
+                raise RuntimeError("Wait until the current recording or transcription has finished.")
             config = self.config
             if self.client is None or (not config.api_key and not isinstance(self.client, QaClient)):
-                raise RuntimeError("Vul eerst je Groq API key in en sla je instellingen op.")
+                raise RuntimeError("Enter your Groq API key and save your settings first.")
             entry = self.recordings.get(recording_id)
             session = RecordingSession(
                 input_device=None, sample_rate=config.sample_rate, channels=config.channels,
@@ -950,11 +950,11 @@ class DictationEngine:
                     preserved_path = temp_path
                     temp_path = None  # Keep the original as a last-resort backup.
                     raise RuntimeError(
-                        f"Opname opslaan in Geschiedenis mislukt. Audio staat nog in {preserved_path}: {exc}"
+                        f"Saving the recording to History failed. The audio is still in {preserved_path}: {exc}"
                     ) from exc
                 wav_path = self.recordings.audio_path(recording)
                 self.recording_changed()
-                self.notify(f"Audio: {duration:.1f}s, piek {peak:.3f}, rms {rms:.3f}")
+                self.notify(f"Audio: {duration:.1f}s, peak {peak:.3f}, rms {rms:.3f}")
             else:
                 wav_path = self.recordings.audio_path(recording)
 
@@ -965,8 +965,8 @@ class DictationEngine:
                     raise NoSpeechDetected()
 
             if new_recording and (duration < MIN_TRANSCRIPTION_SECONDS or wav_path.stat().st_size < MIN_TRANSCRIPTION_BYTES):
-                self.update_recording(recording, status="failed", error="Opname te kort. Je kunt opnieuw proberen.")
-                self.notify("Transcriptie te kort. Er is niets geplakt.")
+                self.update_recording(recording, status="failed", error="Recording too short. You can try again.")
+                self.notify("Transcript too short. Nothing was pasted.")
                 self.emit_state("too_short")
                 play_sound("error.wav")
                 show_idle_bubble = False
@@ -974,7 +974,7 @@ class DictationEngine:
 
             self.update_recording(recording, status="processing")
             if isinstance(upload, tuple):
-                self.notify("Lange stilte aan het eind niet meegestuurd naar Groq.")
+                self.notify("Long silence at the end was not sent to Groq.")
 
             text = apply_word_replacements(
                 self.transcribe(session, wav_path, upload).strip(),
@@ -993,16 +993,16 @@ class DictationEngine:
             elapsed = time.perf_counter() - started_at
 
             if not text:
-                raise RuntimeError("Geen tekst herkend. Opname bewaard; probeer opnieuw via Geschiedenis.")
+                raise RuntimeError("No text recognized. Recording saved; try again from History.")
 
             if set(text) == {"*"}:
-                raise RuntimeError("Groq gaf alleen sterretjes terug. Check je microfoon of probeer opnieuw via Geschiedenis.")
+                raise RuntimeError("Groq returned only asterisks. Check your microphone or try again from History.")
 
             self.update_recording(recording, status="done", text=text)
             pasted_text = append_trailing_space(text)
             pyperclip.copy(clipboard_text(pasted_text))
-            done = "Transcriptie opgeschoond" if cleaned else "Transcriptie klaar"
-            self.notify(f"{done} in {elapsed:.1f}s. Tekst staat op je klembord.")
+            done = "Transcript cleaned up" if cleaned else "Transcript ready"
+            self.notify(f"{done} in {elapsed:.1f}s. Text copied to your clipboard.")
             try:
                 self.transcript_callback(text)
             except Exception:
@@ -1011,9 +1011,9 @@ class DictationEngine:
             if session.paste_after_transcription:
                 try:
                     paste_clipboard()
-                    self.notify("Geplakt in het actieve venster.")
+                    self.notify("Pasted into the active window.")
                 except Exception as exc:
-                    self.notify(f"Automatisch plakken mislukte, maar de tekst staat op je klembord: {exc}")
+                    self.notify(f"Automatic paste failed, but the text is on your clipboard: {exc}")
 
             play_sound("success.wav")
             if cleanup_wanted and not cleaned:
@@ -1028,7 +1028,7 @@ class DictationEngine:
         except Exception as exc:
             if recording is not None:
                 self.update_recording(recording, status="failed", error=str(exc))
-            self.notify(f"Fout: {exc}")
+            self.notify(f"Error: {exc}")
             play_sound("error.wav")
         finally:
             frames.clear()
@@ -1042,7 +1042,7 @@ class DictationEngine:
             if show_idle_bubble:
                 self.emit_state("idle")
             self.recording_changed()
-            self.notify("Klaar. Gebruik je shortcut voor een nieuwe opname.")
+            self.notify("Ready. Use your shortcut for a new recording.")
 
     def clean_up(self, session: RecordingSession, text: str) -> tuple[str, bool]:
         """AI cleanup, or the literal transcript when it fails. Never loses the dictation."""
@@ -1053,7 +1053,7 @@ class DictationEngine:
             )
         except CleanupError as exc:
             logging.warning("AI cleanup skipped: %s", exc.__cause__ or exc)
-            self.notify(f"{exc}. Letterlijke tekst gebruikt.")
+            self.notify(f"{exc}. Used the literal text.")
             return text, False
         logging.info("AI cleanup with %s in %.2fs", session.cleanup_model, time.perf_counter() - started_at)
         return cleaned, True
@@ -1085,8 +1085,8 @@ class DictationEngine:
             error_text = str(exc).lower()
             if "prompt" in error_text and ("224" in error_text or "token" in error_text):
                 raise RuntimeError(
-                    "Prompt en woordenboek zijn samen te lang voor Groq. "
-                    "Maak de Prompt korter of verwijder enkele woorden."
+                    "The prompt and dictionary together are too long for Groq. "
+                    "Shorten the prompt or remove some words."
                 ) from exc
             raise
 

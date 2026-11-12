@@ -28,9 +28,9 @@ class MicrophoneNameTests(unittest.TestCase):
     def test_unavailable_microphones_are_summarised(self) -> None:
         from dictation_core import unavailable_microphones_text
 
-        self.assertEqual(unavailable_microphones_text(["Soundcore"]), "Soundcore niet verbonden")
-        self.assertEqual(unavailable_microphones_text(["A", "B"]), "A en B niet verbonden")
-        self.assertEqual(unavailable_microphones_text(["A", "B", "C"], connected=False), "3 microfoons niet beschikbaar")
+        self.assertEqual(unavailable_microphones_text(["Soundcore"]), "Soundcore not connected")
+        self.assertEqual(unavailable_microphones_text(["A", "B"]), "A and B not connected")
+        self.assertEqual(unavailable_microphones_text(["A", "B", "C"], connected=False), "3 microphones unavailable")
 
 
 class FinalPeriodPreferenceTests(unittest.TestCase):

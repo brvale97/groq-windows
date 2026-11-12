@@ -23,10 +23,10 @@ class TranscriptionHistoryTests(unittest.TestCase):
     def test_round_trips_through_disk_and_ignores_garbage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
-            TranscriptionHistory(path).add("Bewaard", created_at=1_700_000_000)
+            TranscriptionHistory(path).add("Saved", created_at=1_700_000_000)
             stored = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(stored["entries"][0]["text"], "Bewaard")
-            self.assertEqual(TranscriptionHistory(path).entries[0].text, "Bewaard")
+            self.assertEqual(stored["entries"][0]["text"], "Saved")
+            self.assertEqual(TranscriptionHistory(path).entries[0].text, "Saved")
 
             path.write_text("{not json", encoding="utf-8")
             with self.assertLogs(level="WARNING"):
@@ -44,9 +44,9 @@ class TranscriptionHistoryTests(unittest.TestCase):
     def test_labels_and_preview(self) -> None:
         now = time.time()
         today = HistoryEntry("Een hele lange tekst " * 10, now)
-        self.assertTrue(today.label(now).startswith("Vandaag "))
+        self.assertTrue(today.label(now).startswith("Today "))
         yesterday = HistoryEntry("x", now - 86_400)
-        self.assertTrue(yesterday.label(now).startswith("Gisteren "))
+        self.assertTrue(yesterday.label(now).startswith("Yesterday "))
         self.assertTrue(today.preview(30).endswith("…"))
         self.assertLessEqual(len(today.preview(30)), 30)
 
@@ -117,7 +117,7 @@ class RecordingHistoryTests(unittest.TestCase):
         self.history.update(entry.id, status="processing")
         loaded = RecordingHistory(self.history.directory)
         self.assertEqual(loaded.get(entry.id).status, "failed")
-        self.assertIn("onderbroken", loaded.get(entry.id).error)
+        self.assertIn("interrupted", loaded.get(entry.id).error)
 
     def test_metadata_write_failure_does_not_lose_committed_audio(self) -> None:
         from history import os
@@ -155,7 +155,7 @@ class RecordingHistoryTests(unittest.TestCase):
     def test_missing_or_expired_recording_cannot_be_retried(self) -> None:
         entry = self.history.add(self.source)
         self.history.audio_path(entry).unlink()
-        with self.assertRaisesRegex(RuntimeError, "niet meer beschikbaar"):
+        with self.assertRaisesRegex(RuntimeError, "no longer available"):
             self.history.get(entry.id)
         with self.assertRaises(RuntimeError):
             self.history.get("../outside")

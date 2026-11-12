@@ -23,7 +23,7 @@ TARGET_SCRIPT = r'''
 import pathlib, sys, tkinter as tk
 out = pathlib.Path(sys.argv[1])
 root = tk.Tk()
-root.title("Groq E2E doelvenster")
+root.title("Groq E2E target window")
 root.geometry("640x220+80+80")
 text = tk.Text(root, font=("Segoe UI", 12))
 text.pack(fill="both", expand=True)
@@ -126,8 +126,8 @@ class DesktopEndToEndTests(unittest.TestCase):
         target = subprocess.Popen([sys.executable, str(work / "target.py"), str(target_text)])
         self.addCleanup(target.kill)
         lib = user32()
-        self.assertTrue(wait_for(lambda: lib.FindWindowW(None, "Groq E2E doelvenster"), 10), "target window")
-        target_hwnd = int(lib.GetAncestor(lib.FindWindowW(None, "Groq E2E doelvenster"), 2))
+        self.assertTrue(wait_for(lambda: lib.FindWindowW(None, "Groq E2E target window"), 10), "target window")
+        target_hwnd = int(lib.GetAncestor(lib.FindWindowW(None, "Groq E2E target window"), 2))
 
         def focus_target() -> bool:
             send_keys(0x12)  # A key press grants this process the right to switch the foreground.
@@ -144,7 +144,7 @@ class DesktopEndToEndTests(unittest.TestCase):
         import config_store
         import engine
 
-        texts = iter(["Eerste dictaat via sneltoets.", "Tweede dictaat, gestopt met de bubbel."])
+        texts = iter(["First dictation via shortcut.", "Second dictation, stopped with the bubble."])
 
         class FakeGroq:
             def __init__(self, api_key):
@@ -215,7 +215,7 @@ class DesktopEndToEndTests(unittest.TestCase):
                 on_main(lambda: grab_bubble("recording"))
                 time.sleep(1.0)
                 press_hotkey()
-                self.assertTrue(wait_for(lambda: target_text.read_text(encoding="utf-8").startswith("Eerste dictaat"), 10),
+                self.assertTrue(wait_for(lambda: target_text.read_text(encoding="utf-8").startswith("First dictation"), 10),
                                 f"first paste, target has {target_text.read_text(encoding='utf-8')!r}")
                 results["foreground"].append(("after first paste", foreground_root() == target_hwnd))
                 self.assertTrue(wait_for(lambda: tray.engine.state == "idle", 5))
@@ -230,7 +230,7 @@ class DesktopEndToEndTests(unittest.TestCase):
                 self.assertTrue(wait_for(lambda: tray.engine.state in {"processing", "idle"}, 3), "bubble click stops")
                 if tray.engine.state == "processing":
                     on_main(lambda: grab_bubble("processing"))
-                self.assertTrue(wait_for(lambda: "Tweede dictaat" in target_text.read_text(encoding="utf-8"), 10),
+                self.assertTrue(wait_for(lambda: "Second dictation" in target_text.read_text(encoding="utf-8"), 10),
                                 f"second paste, target has {target_text.read_text(encoding='utf-8')!r}")
                 results["target_text"] = target_text.read_text(encoding="utf-8")
                 results["recordings"] = [entry.status for entry in tray.recordings.entries]
@@ -249,7 +249,7 @@ class DesktopEndToEndTests(unittest.TestCase):
         self.assertEqual(results["errors"], [])
         self.assertTrue(results["bubble_noactivate"])
         self.assertTrue(all(ok for _name, ok in results["foreground"]), results["foreground"])
-        self.assertEqual(results["target_text"], "Eerste dictaat via sneltoets. Tweede dictaat, gestopt met de bubbel. ")
+        self.assertEqual(results["target_text"], "First dictation via shortcut. Second dictation, stopped with the bubble. ")
         self.assertEqual(results["recordings"], ["done", "done"])
         self.assertTrue(all(duration > 1.0 for duration in results["frames"]), results["frames"])
         qt.processEvents()

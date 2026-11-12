@@ -235,7 +235,7 @@ def parse_hotkey(value: str) -> Hotkey:
     parts = [_normalize_part(part) for part in split_hotkey_text(str(value))]
     parts = [part for part in parts if part]
     if not parts:
-        raise HotkeyError("Vul eerst een shortcut in.")
+        raise HotkeyError("Enter a shortcut first.")
 
     modifiers: list[str] = []
     keys: list[str] = []
@@ -248,11 +248,11 @@ def parse_hotkey(value: str) -> Hotkey:
 
     if not keys:
         raise HotkeyError(
-            "Een shortcut heeft naast Ctrl, Alt, Shift of Windows ook een gewone toets nodig, bijvoorbeeld alt+z."
+            "Besides Ctrl, Alt, Shift or Windows, a shortcut also needs a regular key, for example alt+z."
         )
     if len(keys) > 1:
         raise HotkeyError(
-            f"Een shortcut kan maar één gewone toets bevatten. Gevonden: {', '.join(keys)}."
+            f"A shortcut can contain only one regular key. Found: {', '.join(keys)}."
         )
 
     key = keys[0]
@@ -260,7 +260,7 @@ def parse_hotkey(value: str) -> Hotkey:
     if virtual_key is None and len(key) == 1:
         virtual_key = _virtual_key_for_character(key)
     if virtual_key is None:
-        raise HotkeyError(f"De toets '{key}' wordt niet herkend als shortcut-toets.")
+        raise HotkeyError(f"The key '{key}' is not recognized as a shortcut key.")
 
     ordered = tuple(modifier for modifier in MODIFIER_ORDER if modifier in modifiers)
     return Hotkey(modifiers=ordered, key=key, virtual_key=virtual_key)
@@ -353,7 +353,7 @@ class HotkeyListener:
         self._thread = threading.Thread(target=self._run, name="hotkey-loop", daemon=True)
         self._thread.start()
         if not self._ready.wait(5):
-            raise HotkeyError("De shortcut-listener kon niet worden gestart.")
+            raise HotkeyError("The shortcut listener could not be started.")
 
     def stop(self) -> None:
         self._stopped = True
@@ -391,9 +391,9 @@ class HotkeyListener:
             self._apply_error = None
             self._applied.clear()
         if not user32.PostThreadMessageW(self._thread_id, WM_APPLY_HOTKEY, 0, 0):
-            raise HotkeyError("De shortcut kon niet worden doorgegeven aan de listener.")
+            raise HotkeyError("The shortcut could not be passed to the listener.")
         if not self._applied.wait(5):
-            raise HotkeyError("De shortcut-listener reageert niet.")
+            raise HotkeyError("The shortcut listener is not responding.")
         if self._apply_error is not None:
             raise self._apply_error
         return self.current
@@ -472,13 +472,13 @@ class HotkeyListener:
                         else:
                             code = ctypes.get_last_error()
                             if code == ERROR_HOTKEY_ALREADY_REGISTERED:
-                                detail = "een ander programma gebruikt deze toetscombinatie al"
+                                detail = "another program already uses this key combination"
                             elif code == ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION:
-                                detail = "de app draait niet in een interactieve Windows-sessie (bijvoorbeeld via SSH of een service)"
+                                detail = "the app is not running in an interactive Windows session (for example via SSH or a service)"
                             else:
-                                detail = f"Windows-fout {code}"
+                                detail = f"Windows error {code}"
                             self._apply_error = HotkeyError(
-                                f"De shortcut '{wanted}' kon niet worden geactiveerd: {detail}."
+                                f"The shortcut '{wanted}' could not be activated: {detail}."
                             )
                     self._applied.set()
                 else:

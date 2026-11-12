@@ -64,7 +64,7 @@ class PasteTimingTests(unittest.TestCase):
         self.assertTrue(all(step >= windows_paste.KEY_STEP_SECONDS - 1e-9 for step in steps))
         self.assertTrue(report.clipboard_free)
         self.assertEqual(report.released_modifiers, ())
-        self.assertIn("Ctrl+V naar Signal.exe", log)
+        self.assertIn("Ctrl+V to Signal.exe", log)
 
     def test_waits_until_the_shortcut_keys_are_released(self):
         keyboard, report, _ = self.paste(modifiers=(VK_LMENU,), modifiers_until=0.4)
@@ -82,7 +82,7 @@ class PasteTimingTests(unittest.TestCase):
         )
         self.assertGreaterEqual(keyboard.event_times[0], windows_paste.MODIFIER_RELEASE_TIMEOUT_SECONDS)
         self.assertEqual(report.released_modifiers, (VK_LWIN, VK_RCONTROL))
-        self.assertIn("vastgehouden toetsen losgelaten", log)
+        self.assertIn("released held keys", log)
 
     def test_waits_while_a_clipboard_tool_reads_a_long_text(self):
         keyboard, report, _ = self.paste(clipboard_busy=[(0.05, 0.3)])
@@ -102,7 +102,7 @@ class PasteTimingTests(unittest.TestCase):
         self.assertEqual(keyboard.events, CHORD)
         self.assertFalse(report.clipboard_free)
         self.assertLess(keyboard.event_times[0], 1.0)
-        self.assertIn("klembord bleef bezet", log)
+        self.assertIn("clipboard stayed busy", log)
 
     def test_unknown_foreground_app_does_not_stop_the_paste(self):
         clock = FakeClock()

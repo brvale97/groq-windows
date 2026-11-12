@@ -32,7 +32,7 @@ def windows_audio_thread():
     result = ole.CoInitializeEx(None, 0)  # COINIT_MULTITHREADED
     # An existing STA also provides COM; leave its initialization untouched.
     if result < 0 and result != -2147417850:  # RPC_E_CHANGED_MODE
-        raise OSError(f"Windows audio-initialisatie mislukt (0x{result & 0xffffffff:08x}).")
+        raise OSError(f"Windows audio initialization failed (0x{result & 0xffffffff:08x}).")
     try:
         yield
     finally:
@@ -114,7 +114,7 @@ class MicrophoneTest:
         try:
             info = self.backend.query_devices(self.device, "input")
             if info["max_input_channels"] < 1:
-                raise RuntimeError("De geselecteerde microfoon is niet beschikbaar.")
+                raise RuntimeError("The selected microphone is not available.")
             self.sample_rate = round(info["default_samplerate"])
             stream = self.backend.InputStream(
                 device=self.device, samplerate=self.sample_rate, channels=1,
@@ -128,9 +128,9 @@ class MicrophoneTest:
                 if self.stop_requested.is_set() or self.finish_requested.is_set():
                     break
                 if not stream.active:
-                    raise RuntimeError("De microfoon is gestopt of losgekoppeld.")
+                    raise RuntimeError("The microphone stopped or was disconnected.")
                 if time.monotonic() > deadline:
-                    raise RuntimeError("Geen audio ontvangen. Controleer de aansluiting van de microfoon.")
+                    raise RuntimeError("No audio received. Check the microphone connection.")
             stream.stop()
             stream.close()
             stream = None
@@ -138,7 +138,7 @@ class MicrophoneTest:
                 self.state = "cancelled"
                 self.frames.clear()
             elif not self.sample_count:
-                raise RuntimeError("Geen audio ontvangen van de microfoon.")
+                raise RuntimeError("No audio received from the microphone.")
             else:
                 self.state = "ready"
         finally:
@@ -150,7 +150,7 @@ class MicrophoneTest:
 
     def playback_path(self) -> Path:
         if self.state != "ready" or not self.frames:
-            raise RuntimeError("Maak eerst een testopname.")
+            raise RuntimeError("Make a test recording first.")
         if self._directory is None:
             self._directory = tempfile.TemporaryDirectory(prefix="groq-microphone-test-")
         path = Path(self._directory.name) / "test.wav"

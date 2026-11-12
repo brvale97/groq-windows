@@ -90,7 +90,7 @@ class RequestTests(unittest.TestCase):
         rate_limited = RuntimeError("Error code: 429")
         rate_limited.status_code = 429
         missing = RuntimeError("model_not_found")
-        for exc, expected in ((rate_limited, "limiet"), (missing, "niet beschikbaar"), (TimeoutError("timed out"), "mislukt")):
+        for exc, expected in ((rate_limited, "rate limit"), (missing, "not available"), (TimeoutError("timed out"), "failed")):
             with self.subTest(expected=expected):
                 client = client_answering("x")
                 client.chat.completions.create.side_effect = exc

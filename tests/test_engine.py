@@ -157,7 +157,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(dictation.state, "idle")
             self.assertIsNone(dictation.active_session)
             play_sound.assert_called_once_with("error.wav")
-        self.assertIn("Geen microfoon gevonden", messages[0])
+        self.assertIn("No microphone found", messages[0])
 
     SOUNDCORE = "Headset Microphone (Soundcore Motion Boom)"
 
@@ -236,7 +236,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(dictation.active_input.returned)
         self.assertFalse(dictation.active_input.fallback)
         self.assertEqual(events[0], ("input", dictation.active_input))
-        self.assertIn("Terug naar", events[1][1])
+        self.assertIn("Back to", events[1][1])
         self.assertEqual(dictation.lost_inputs, set())
 
     def test_microphones_listed_again_are_no_longer_excluded(self) -> None:
@@ -603,7 +603,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         entry = self.engine.recordings.entries[0]
         audio = self.engine.recordings.audio_path(entry).read_bytes()
         self.assertEqual(entry.status, "failed")
-        self.assertIn("Geen spraak", entry.error)
+        self.assertIn("No speech", entry.error)
         self.engine.state_callback.assert_called_with("no_speech")
         self.run_retry_synchronously(entry.id)
         self.assertEqual(self.engine.recordings.audio_path(entry).read_bytes(), audio)
@@ -620,7 +620,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         self.engine.transcribe_and_output(self.session, self.frames())
         entry = self.engine.recordings.entries[0]
         self.assertEqual(entry.status, "failed")
-        self.assertIn("Geen spraak", entry.error)
+        self.assertIn("No speech", entry.error)
         kwargs = self.engine.client.audio.transcriptions.create.call_args.kwargs
         self.assertEqual(kwargs["response_format"], "verbose_json")
         self.clipboard.assert_not_called()
@@ -693,7 +693,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         with wave.open(str(self.engine.recordings.audio_path(entry)), "rb") as wav:
             self.assertEqual(wav.readframes(wav.getnframes()), recorded)
         messages = [str(call.args[0]) for call in self.engine.status_callback.call_args_list]
-        self.assertTrue(any("stilte aan het eind" in message for message in messages))
+        self.assertTrue(any("silence at the end" in message for message in messages))
 
     def test_pause_inside_the_dictation_still_sends_the_whole_recording(self) -> None:
         speech = self.frames(duration=1.0)[0]
@@ -748,7 +748,7 @@ class RecordingRecoveryTests(unittest.TestCase):
         entry = self.fail_then_reload()
         for state in ("recording", "processing"):
             self.engine.state = state
-            with self.assertRaisesRegex(RuntimeError, "Wacht"):
+            with self.assertRaisesRegex(RuntimeError, "Wait until"):
                 self.engine.retry_recording(entry.id)
         self.engine.state = "idle"
         self.engine.config = dataclasses.replace(self.engine.config, api_key="")
@@ -808,7 +808,7 @@ class AiCleanupTests(unittest.TestCase):
         self.paste.assert_called_once_with()
         self.assertNotIn(mock.call("cleanup_skipped"), self.engine.state_callback.call_args_list)
         messages = [str(call.args[0]) for call in self.engine.status_callback.call_args_list]
-        self.assertTrue(any(message.startswith("Transcriptie opgeschoond") for message in messages))
+        self.assertTrue(any(message.startswith("Transcript cleaned up") for message in messages))
 
     def test_failed_cleanup_pastes_the_literal_transcript_and_says_so(self) -> None:
         self.engine.client.chat.completions.create.side_effect = RuntimeError("Request timed out.")

@@ -82,7 +82,7 @@ class InputDeviceResolutionTests(unittest.TestCase):
         def resolve(selector):
             calls.append(("resolve", selector))
             if selector not in indices:
-                raise RuntimeError(f"Microfoon {selector!r} is niet aangesloten of niet beschikbaar.")
+                raise RuntimeError(f"Microfoon {selector!r} is not connected or not available.")
             return indices[selector]
 
         class FakeStream:
@@ -146,7 +146,7 @@ class InputDeviceResolutionTests(unittest.TestCase):
         self.assertFalse(error.found)
         self.assertEqual(opened, [])
 
-    def test_windows_standaard_is_an_entry_like_any_other(self) -> None:
+    def test_windows_default_is_an_entry_like_any_other(self) -> None:
         choice, opened, _calls = self.open_input([self.SOUNDCORE, "", self.RODE], connected=[self.RODE])
         self.assertEqual((choice.priority, choice.device, choice.wasapi, choice.windows_default), (2, None, False, True))
         self.assertEqual(choice.name, "Microfoonmatrix (Realtek(R) Audio)")
@@ -154,7 +154,7 @@ class InputDeviceResolutionTests(unittest.TestCase):
         self.assertEqual(opened, [None])
         # Without a Windows default microphone the entry is skipped like a missing one.
         choice, opened, _calls = self.open_input(["", self.RODE], connected=[self.RODE], default=None)
-        self.assertEqual((choice.priority, choice.skipped), (2, ("Windows-standaard",)))
+        self.assertEqual((choice.priority, choice.skipped), (2, ("Windows default",)))
 
     def test_an_empty_list_just_uses_the_windows_default(self) -> None:
         choice, opened, calls = self.open_input([])
@@ -166,11 +166,11 @@ class InputDeviceResolutionTests(unittest.TestCase):
         error, opened, _calls = self.open_input([self.SOUNDCORE, ""], default=None, default_opens=False)
         self.assertIsInstance(error, engine.NoMicrophoneError)
         self.assertFalse(error.found)
-        self.assertIn("Geen microfoon gevonden", str(error))
+        self.assertIn("No microphone found", str(error))
         self.assertEqual(opened, [])
         error, _opened, _calls = self.open_input([self.SOUNDCORE, ""], default_opens=False)
         self.assertTrue(error.found)  # Windows has a default microphone, it just would not open.
-        self.assertIn("kon worden geopend", str(error))
+        self.assertIn("could be opened", str(error))
 
     def test_a_failing_refresh_does_not_block_the_recording(self) -> None:
         dictation = engine.DictationEngine.__new__(engine.DictationEngine)
@@ -194,7 +194,7 @@ class InputDeviceResolutionTests(unittest.TestCase):
             ]),
         ):
             options = engine.input_devices()
-        self.assertEqual(options[0], ("", "Windows-standaard: Microfoonarray (Realtek High Definition Audio)"))
+        self.assertEqual(options[0], ("", "Windows default: Microfoonarray (Realtek High Definition Audio)"))
         self.assertEqual([device_id for device_id, _ in options], ["", "wasapi:Microfoonarray (Realtek High Definition Audio)"])
 
     def test_absent_default_input_is_explicit(self):
@@ -204,7 +204,7 @@ class InputDeviceResolutionTests(unittest.TestCase):
                 {"name": "Windows WASAPI", "default_input_device": -1, "devices": []},
             ]),
         ):
-            self.assertEqual(engine.input_devices(), [("", "Windows-standaard (geen microfoon beschikbaar)")])
+            self.assertEqual(engine.input_devices(), [("", "Windows default (no microphone available)")])
 
     def test_named_selection_survives_renumbering_and_never_falls_back_after_unplug(self):
         devices = [
@@ -219,7 +219,7 @@ class InputDeviceResolutionTests(unittest.TestCase):
             devices.reverse()
             self.assertEqual(engine.resolve_input_device('wasapi:TONOR'), 0)
             devices[0]['name'] = 'Andere microfoon'
-            with self.assertRaisesRegex(RuntimeError, 'niet aangesloten'):
+            with self.assertRaisesRegex(RuntimeError, 'not connected'):
                 engine.resolve_input_device('wasapi:TONOR')
 
 

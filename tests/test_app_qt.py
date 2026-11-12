@@ -75,7 +75,7 @@ class StartupTests(unittest.TestCase):
         with mock.patch.object(app.time, "monotonic", return_value=111.0):
             tray._poll_startup_ready()
         tray._fail_startup.assert_called_once()
-        self.assertIn("systeemvak", str(tray._fail_startup.call_args.args[0]))
+        self.assertIn("system tray", str(tray._fail_startup.call_args.args[0]))
 
     def test_synchronous_startup_failure_runs_cleanup(self):
         tray = bare_tray()
@@ -145,17 +145,17 @@ class StatusBubbleTests(unittest.TestCase):
         self.bubble.set_state("processing")
         self.assertFalse(self.bubble.wave_timer.isActive())
         self.assertTrue(self.bubble.spinner_timer.isActive())
-        self.assertIn("Transcriptie", self.bubble.windowTitle())
+        self.assertIn("Transcribing", self.bubble.windowTitle())
         self.bubble.set_state("idle")
         self.assertFalse(self.bubble.isVisible())
         self.assertFalse(self.bubble.spinner_timer.isActive())
 
     def test_notice_hides_after_a_few_seconds(self):
-        self.bubble.show_notice("Transcriptie te kort")
+        self.bubble.show_notice("Transcript too short")
         self.assertTrue(self.bubble.isVisible())
         self.assertTrue(self.bubble.hide_timer.isActive())
         self.assertEqual(self.bubble.hide_timer.interval(), app.NOTICE_VISIBLE_MS)
-        self.assertIn("Transcriptie te kort", self.bubble.windowTitle())
+        self.assertIn("Transcript too short", self.bubble.windowTitle())
         self.bubble.grab()  # Paints without errors.
 
     def test_waveform_scrolls_with_speech_and_settles_after_silence(self):
@@ -213,7 +213,7 @@ class StatusBubbleTests(unittest.TestCase):
         self.bubble.set_state("recording")
         self.assertTrue(self.bubble.input_notice_visible)
         self.assertEqual(self.bubble.input_notice_texts(),
-                         ("Overgeschakeld naar Rode NT-USB Mini", "Soundcore Motion Boom niet verbonden"))
+                         ("Switched to Rode NT-USB Mini", "Soundcore Motion Boom not connected"))
         self.assertTrue(self.bubble.input_notice_timer.isActive())
         self.assertEqual(self.bubble.input_notice_timer.interval(), app.INPUT_NOTICE_MS)
         self.assertGreater(self.bubble.height(), plain.height() + 40)
@@ -248,15 +248,15 @@ class StatusBubbleTests(unittest.TestCase):
         self.assertTrue(self.bubble.input_notice_timer.isActive())
         self.assertGreater(self.bubble.height(), plain_height)
         self.assertEqual(self.bubble.input_notice_texts(), (
-            "Overgeschakeld naar TONOR TM310 shotgun Mic", "Verbinding met Soundcore Motion Boom verbroken",
+            "Switched to TONOR TM310 shotgun Mic", "Lost connection to Soundcore Motion Boom",
         ))
         self.bubble.wave_tick()
         self.assertEqual(self.bubble.badge_width(), app.RECORDING_BADGE_WIDTH)
         self.bubble.grab()
-        # Windows-standaard taking over after a loss says so.
+        # Windows default taking over after a loss says so.
         self.bubble.set_input(app.InputChoice(None, "Microfoonmatrix (Realtek(R) Audio)", 2,
                                               lost="Microfoon (TONOR TM310 shotgun Mic)", windows_default=True))
-        self.assertEqual(self.bubble.input_notice_texts()[1], "Verbinding met TONOR TM310 shotgun Mic verbroken · Windows-standaard")
+        self.assertEqual(self.bubble.input_notice_texts()[1], "Lost connection to TONOR TM310 shotgun Mic · Windows default")
 
     def test_switching_back_to_priority_one_shows_a_card_without_badge(self):
         self.bubble.set_input(self.fallback())
@@ -265,7 +265,7 @@ class StatusBubbleTests(unittest.TestCase):
         back = app.InputChoice(3, "Headset Microphone (Soundcore Motion Boom)", 1, True, returned=True)
         self.bubble.set_input(back)
         self.assertTrue(self.bubble.input_notice_visible)
-        self.assertEqual(self.bubble.input_notice_texts(), ("Terug naar Soundcore Motion Boom", "Weer verbonden"))
+        self.assertEqual(self.bubble.input_notice_texts(), ("Back to Soundcore Motion Boom", "Reconnected"))
         self.bubble.wave_tick()
         self.assertEqual(self.bubble.badge_width(), 0)  # Priority 1 again: no amber number.
         self.bubble.grab()
@@ -290,14 +290,14 @@ class StatusBubbleTests(unittest.TestCase):
             "Headset Microphone (Soundcore Motion Boom)", "Microfoon (Rode NT-USB Mini)",
         ), windows_default=True))
         self.assertEqual(self.bubble.input_notice_texts(), (
-            "Overgeschakeld naar Realtek(R) Audio",
-            "Soundcore Motion Boom en Rode NT-USB Mini niet verbonden · Windows-standaard",
+            "Switched to Realtek(R) Audio",
+            "Soundcore Motion Boom and Rode NT-USB Mini not connected · Windows default",
         ))
         self.bubble.set_input(self.fallback(2, "", ("Headset Microphone (Soundcore Motion Boom)",), windows_default=True))
         self.assertEqual(self.bubble.input_notice_texts(),
-                         ("Overgeschakeld naar Windows-standaard", "Soundcore Motion Boom niet verbonden"))
+                         ("Switched to Windows default", "Soundcore Motion Boom not connected"))
         self.bubble.set_input(self.fallback(4, skipped=("A", "B", "C"), missing=False))
-        self.assertEqual(self.bubble.input_notice_texts()[1], "3 microfoons niet beschikbaar")
+        self.assertEqual(self.bubble.input_notice_texts()[1], "3 microphones unavailable")
         self.bubble.set_state("recording")
         self.bubble.grab()
 
@@ -308,7 +308,7 @@ class StatusBubbleTests(unittest.TestCase):
         self.bubble.grab()
 
     def test_notice_with_a_second_line_stays_longer(self):
-        self.bubble.show_notice("Geen microfoon gevonden", "Verbind je headset of sluit een microfoon aan.",
+        self.bubble.show_notice("No microphone found", "Connect your headset or plug in a microphone.",
                                 glyph="mic-off", visible_ms=app.NO_MICROPHONE_VISIBLE_MS, opens_microphone_settings=True)
         self.assertEqual(self.bubble.hide_timer.interval(), app.NO_MICROPHONE_VISIBLE_MS)
         self.assertGreater(self.bubble.pill_size.height(), 48)
@@ -352,12 +352,12 @@ class TrayBehaviourTests(unittest.TestCase):
         tray = self.tray_with_engine()
         tray.set_engine_state("no_microphone")
         args, kwargs = tray.bubble.show_notice.call_args
-        self.assertEqual(args[0], "Geen microfoon gevonden")
-        self.assertIn("Verbind je headset", args[1])
+        self.assertEqual(args[0], "No microphone found")
+        self.assertIn("Connect your headset", args[1])
         self.assertEqual(kwargs["visible_ms"], app.NO_MICROPHONE_VISIBLE_MS)
         self.assertTrue(kwargs["opens_microphone_settings"])
         tray.set_engine_state("microphone_unavailable")
-        self.assertEqual(tray.bubble.show_notice.call_args.args[0], "Microfoon kon niet worden geopend")
+        self.assertEqual(tray.bubble.show_notice.call_args.args[0], "Could not open the microphone")
         tray.bubble.set_state.assert_not_called()
 
     def test_dictation_start_stops_playback_and_short_audio_shows_a_notice(self):
@@ -366,12 +366,12 @@ class TrayBehaviourTests(unittest.TestCase):
         tray.player.stop.assert_called_once_with()
         tray.bubble.set_state.assert_called_with("recording")
         tray.set_engine_state("too_short")
-        tray.bubble.show_notice.assert_called_once_with("Transcriptie te kort")
+        tray.bubble.show_notice.assert_called_once_with("Transcript too short")
 
     def test_silent_audio_shows_a_notice_without_an_idle_bubble(self):
         tray = self.tray_with_engine()
         tray.set_engine_state("no_speech")
-        tray.bubble.show_notice.assert_called_once_with("Geen spraak gedetecteerd")
+        tray.bubble.show_notice.assert_called_once_with("No speech detected")
         tray.bubble.set_state.assert_not_called()
 
     def test_refresh_releases_playback_before_reinitializing_portaudio(self):
@@ -397,7 +397,7 @@ class TrayBehaviourTests(unittest.TestCase):
             self.assertNotIn("TONOR", str(options))
             self.assertEqual(order, ["release", "terminate", "initialize"])
             tray.engine.state = "recording"
-            with self.assertRaisesRegex(RuntimeError, "Stop eerst"):
+            with self.assertRaisesRegex(RuntimeError, "Stop the recording"):
                 tray.list_input_devices(refresh=True)
             # Without an explicit refresh a busy engine keeps its streams.
             self.assertIn("Realtek", tray.list_input_devices()[0][1])
@@ -426,7 +426,7 @@ class TrayBehaviourTests(unittest.TestCase):
         tray = self.tray_with_engine("processing")
         tray.recordings = mock.Mock()
         tray.history = mock.Mock()
-        with self.assertRaisesRegex(RuntimeError, "Wacht"):
+        with self.assertRaisesRegex(RuntimeError, "Wait until"):
             tray.clear_history()
         tray.recordings.clear.assert_not_called()
         tray.engine.state = "idle"

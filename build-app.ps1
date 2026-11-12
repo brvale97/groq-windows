@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 $python = & ".\bootstrap.ps1" -Profile build | Select-Object -Last 1
 
 function Assert-NativeSuccess([string]$Context) {
-    if ($LASTEXITCODE -ne 0) { throw "$Context is mislukt met exitcode $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) { throw "$Context failed with exit code $LASTEXITCODE." }
 }
 
 function Get-Sha256([string]$Path) {
@@ -30,7 +30,7 @@ $env:GROQ_BUILD_MODE = "onedir"
 & $python -m PyInstaller --noconfirm --clean --distpath ".\dist" --workpath ".\build\onedir" ".\packaging\GroqInsertDictation.spec"
 Assert-NativeSuccess "PyInstaller (mapbuild)"
 if (-not (Test-Path -LiteralPath "$folder\GroqInsertDictation.exe") -or -not (Test-Path -LiteralPath "$folder\_internal")) {
-    throw "PyInstaller rapporteerde succes, maar de mapbuild is onvolledig."
+    throw "PyInstaller reported success, but the folder build is incomplete."
 }
 
 # License texts for Python, Qt for Python (LGPLv3) and the other bundled packages.
