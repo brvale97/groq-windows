@@ -90,6 +90,8 @@ class EngineTests(unittest.TestCase):
                 self.closed = True
 
         dictation = engine.DictationEngine(Config(api_key="test"))
+        # No real audio devices: CI runners have no microphone.
+        dictation.refresh_inputs = lambda: None
         created: list[FakeStream] = []
 
         def make_stream(**kwargs):
@@ -100,6 +102,8 @@ class EngineTests(unittest.TestCase):
         start_thread = threading.Thread(target=dictation.start_recording)
         with (
             mock.patch.object(engine.sd, "InputStream", side_effect=make_stream),
+            mock.patch.object(engine, "default_input_name", return_value="Test microphone"),
+            mock.patch.object(engine, "live_input_names", return_value=None),
             mock.patch.object(engine, "play_sound"),
             mock.patch.object(engine.time, "sleep"),
         ):
