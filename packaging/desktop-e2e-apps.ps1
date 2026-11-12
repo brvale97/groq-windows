@@ -115,7 +115,7 @@ function Close-FirstRunSettings {
     # Without an API key the app opens Settings once after startup (first-run behaviour); close it.
     $deadline = (Get-Date).AddSeconds(8)
     while ((Get-Date) -lt $deadline) {
-        $h = [E2E]::Find('Groq Insert Dictation instellingen')
+        $h = [E2E]::Find('Groq Insert Dictation settings')
         if ($h -ne [IntPtr]::Zero) { [E2E]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null; Start-Sleep -Milliseconds 600; return $true }
         Start-Sleep -Milliseconds 200
     }

@@ -62,6 +62,6 @@ $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup
 New-Item -ItemType Directory -Force -Path (Split-Path $startup) | Out-Null
 Set-Content -LiteralPath $startup -Value "@echo off`r`nstart `"`" `"%LOCALAPPDATA%\Programs\GroqInsertDictation\GroqInsertDictation.exe`"`r`n" -Encoding ASCII
 
-Write-Host "Geinstalleerd: $target"
-if (Test-Path -LiteralPath $backup) { Write-Host "Vorige versie bewaard in: $backup" }
+Write-Host "Installed: $target"
+if (Test-Path -LiteralPath $backup) { Write-Host "Previous version kept in: $backup" }
 Write-Host "Autostart: $startup"

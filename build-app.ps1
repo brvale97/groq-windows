@@ -24,11 +24,11 @@ foreach ($path in @($folder, $zip, $single, $manifest)) {
 }
 New-Item -ItemType Directory -Force -Path ".\build" | Out-Null
 & $python .\branding.py ".\build\GroqInsertDictation.ico"
-Assert-NativeSuccess "App-icoon genereren"
+Assert-NativeSuccess "Generate app icon"
 
 $env:GROQ_BUILD_MODE = "onedir"
 & $python -m PyInstaller --noconfirm --clean --distpath ".\dist" --workpath ".\build\onedir" ".\packaging\GroqInsertDictation.spec"
-Assert-NativeSuccess "PyInstaller (mapbuild)"
+Assert-NativeSuccess "PyInstaller (folder build)"
 if (-not (Test-Path -LiteralPath "$folder\GroqInsertDictation.exe") -or -not (Test-Path -LiteralPath "$folder\_internal")) {
     throw "PyInstaller reported success, but the folder build is incomplete."
 }
@@ -39,26 +39,26 @@ New-Item -ItemType Directory -Force -Path $licenses | Out-Null
 Copy-Item -LiteralPath ".\THIRD_PARTY_NOTICES.md" -Destination $licenses
 Copy-Item -Path ".\packaging\licenses\*.txt" -Destination $licenses
 & $python .\packaging\collect_licenses.py $licenses
-Assert-NativeSuccess "Licentieteksten verzamelen"
+Assert-NativeSuccess "Collect license texts"
 
 if ($Bridge) {
     $env:GROQ_BUILD_MODE = "onefile"
     & $python -m PyInstaller --noconfirm --clean --distpath ".\dist" --workpath ".\build\onefile" ".\packaging\GroqInsertDictation.spec"
     Assert-NativeSuccess "PyInstaller (single-file bridge)"
-    if (-not (Test-Path -LiteralPath $single)) { throw "De single-file bridge ontbreekt." }
+    if (-not (Test-Path -LiteralPath $single)) { throw "The single-file bridge is missing." }
 }
 Remove-Item Env:\GROQ_BUILD_MODE -ErrorAction SilentlyContinue
 
 # A flat zip: GroqInsertDictation.exe, _internal and licenses at the top level.
 & $python .\packaging\make_zip.py $folder $zip
-Assert-NativeSuccess "Updatepakket maken"
+Assert-NativeSuccess "Create update package"
 
 $pythonDescription = (& $python -c "import sys; print(sys.version)").Trim()
-Assert-NativeSuccess "Pythonversie uitlezen"
+Assert-NativeSuccess "Read Python version"
 $pysideVersion = (& $python -c "import PySide6; print(PySide6.__version__)").Trim()
-Assert-NativeSuccess "PySide6-versie uitlezen"
+Assert-NativeSuccess "Read PySide6 version"
 $appVersion = (& $python .\app.py --version).Trim()
-Assert-NativeSuccess "App-versie uitlezen"
+Assert-NativeSuccess "Read app version"
 
 $sources = [ordered]@{}
 foreach ($file in @(
@@ -92,6 +92,6 @@ if ($Bridge) {
 Copy-Item -LiteralPath $manifest -Destination (Join-Path $folder "GroqInsertDictation.build.json")
 
 Write-Host ""
-Write-Host "Gebouwd: $PSScriptRoot\dist\GroqInsertDictation\GroqInsertDictation.exe"
-Write-Host "Updatepakket: $PSScriptRoot\dist\GroqInsertDictation-win64.zip"
+Write-Host "Built: $PSScriptRoot\dist\GroqInsertDictation\GroqInsertDictation.exe"
+Write-Host "Update package: $PSScriptRoot\dist\GroqInsertDictation-win64.zip"
 if ($Bridge) { Write-Host "Bridge: $PSScriptRoot\dist\GroqInsertDictation.exe" }

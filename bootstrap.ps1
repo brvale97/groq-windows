@@ -18,17 +18,17 @@ $python = ".\.venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     if (Get-Command py -ErrorAction SilentlyContinue) {
         & py -3.13 -m venv .venv
-        Assert-NativeSuccess "Python 3.13 virtual environment maken"
+        Assert-NativeSuccess "Create Python 3.13 virtual environment"
     } else {
         & python -m venv .venv
-        Assert-NativeSuccess "Virtual environment maken"
+        Assert-NativeSuccess "Create virtual environment"
     }
 }
 
 $pythonVersion = (& $python -c "import sys; print(sys.version)").Trim()
-Assert-NativeSuccess "Pythonversie uitlezen"
+Assert-NativeSuccess "Read Python version"
 if (-not $pythonVersion.StartsWith("3.13.")) {
-    throw "Deze build is vastgezet op Python 3.13; gevonden: $pythonVersion"
+    throw "This build is pinned to Python 3.13; found: $pythonVersion"
 }
 $requirementsContent = @(
     $pythonVersion
@@ -53,11 +53,11 @@ if (-not $needsInstall) {
 
 if ($needsInstall) {
     & $python -m pip install --upgrade pip
-    Assert-NativeSuccess "pip bijwerken"
+    Assert-NativeSuccess "Upgrade pip"
     & $python -m pip install -r $requirementsFile
-    Assert-NativeSuccess "Dependencies installeren"
+    Assert-NativeSuccess "Install dependencies"
     & $python -m pip check
-    Assert-NativeSuccess "Dependencies controleren"
+    Assert-NativeSuccess "Check dependencies"
     Set-Content -LiteralPath $stamp -Value $requirementsHash -Encoding ASCII
 }
 

@@ -136,7 +136,7 @@ period. The dictation is sent between `<transcript>` tags, so a dictated
 "ignore previous instructions" stays text. If the request fails, is rate
 limited, takes longer than about 10 seconds, or the reply is much longer than
 the dictation (an answer instead of a cleanup), the literal transcript is
-pasted and the bubble shows **Niet opgeschoond**. Recordings and retries from
+pasted and the bubble shows **Not cleaned up**. Recordings and retries from
 History use the same settings; the saved audio is never changed.
 
 Tested on 2026-10-24 with 47 dictations (17 of Bram's real transcripts plus 30
